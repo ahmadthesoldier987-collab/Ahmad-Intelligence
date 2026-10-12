@@ -7,6 +7,8 @@ import math
 import time
 
 import requests
+from google import genai
+from google.genai import types
 
 from PySide6.QtCore import (
     Qt,
@@ -344,6 +346,8 @@ QTextEdit#composerInput {
 QTextBrowser#bubbleText {
     background: transparent;
     border: none;
+    padding: 0px;
+    margin: 0px;
     selection-background-color: @select@;
 }
 
@@ -895,6 +899,7 @@ class AutoText(QTextBrowser):
 
     def __init__(self, shrink=False, max_width=None):
         super().__init__()
+        self._fitting = False
         self.setObjectName("bubbleText")
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setVerticalScrollBarPolicy(
@@ -906,7 +911,13 @@ class AutoText(QTextBrowser):
         self.setOpenExternalLinks(True)
         self.setReadOnly(True)
         self.viewport().setAutoFillBackground(False)
-        self.setStyleSheet(f"font-size: {UI['font_px']}px;")
+        self.setStyleSheet(
+            "QTextBrowser#bubbleText {"
+            f" font-size: {UI['font_px']}px;"
+            " padding: 0px; margin: 0px; border: none;"
+            " background: transparent; }"
+        )
+        self.setViewportMargins(0, 0, 0, 0)
         self.document().setDocumentMargin(0)
         self.document().setDefaultStyleSheet(
             "p { margin-top: 0px; margin-bottom: 8px; }"
@@ -936,22 +947,74 @@ class AutoText(QTextBrowser):
             self._fit_height
         )
 
-    def _fit_height(self, size):
-        height = int(math.ceil(size.height())) + 2
-        if height != self.height():
-            self.setFixedHeight(height)
+    # ---- sizing -------------------------------------------------
+
+    def _sync_font(self):
+        """Make the document use the real (stylesheet) font before measuring."""
+        self.ensurePolished()
+        self.document().setDefaultFont(self.font())
+
+    def _fit_height(self, *_args):
+        if self._fitting:
+            return
+
+        self._fitting = True
+        try:
+            width = self.viewport().width()
+
+            if width > 0:
+                self.document().setTextWidth(width)
+
+            height = int(math.ceil(self.document().size().height())) + 8
+
+            if height != self.height():
+                self.setFixedHeight(height)
+
+            # The view must never be scrolled inside its own bubble,
+            # otherwise the first lines look "cut off" at the top.
+            bar = self.verticalScrollBar()
+            if bar.value() != 0:
+                bar.setValue(0)
+        finally:
+            self._fitting = False
+
+    def _refit_later(self):
+        self._fit_height()
+        QTimer.singleShot(0, self._fit_height)
+        QTimer.singleShot(60, self._fit_height)
+        QTimer.singleShot(200, self._fit_height)
+
+    def wheelEvent(self, event):
+        # Let the chat scroll area handle the wheel, not this text view.
+        event.ignore()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_height()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refit_later()
+
+    # ---- content ------------------------------------------------
 
     def set_plain(self, text):
+        self._sync_font()
         self.setPlainText(text)
 
         if self.shrink:
             probe = self.document().clone()
+            probe.setDefaultFont(self.font())
             probe.setTextWidth(-1)
-            self.natural_width = int(math.ceil(probe.idealWidth())) + 3
+            self.natural_width = int(math.ceil(probe.idealWidth())) + 16
             self.updateGeometry()
 
+        self._refit_later()
+
     def set_markdown(self, text):
+        self._sync_font()
         self.setMarkdown(text)
+        self._refit_later()
 
     def sizeHint(self):
         if self.shrink and self.natural_width:
@@ -982,12 +1045,75 @@ class ChatScroll(QScrollArea):
 
 class HistoryList(QListWidget):
     delete_pressed = Signal()
+    options_clicked = Signal(QPoint)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hover_pos = QPoint(-1, -1)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete:
             self.delete_pressed.emit()
             return
         super().keyPressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self._hover_pos = event.position().toPoint()
+        super().mouseMoveEvent(event)
+        self.viewport().update()
+
+    def leaveEvent(self, event):
+        self._hover_pos = QPoint(-1, -1)
+        self.viewport().update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+
+        if self._hover_pos.x() < 0:
+            return
+
+        item = self.itemAt(self._hover_pos)
+        if item is None:
+            return
+
+        rect = self.visualItemRect(item)
+        button_rect = QRectF(
+            rect.right() - 34,
+            rect.top() + 2,
+            30,
+            rect.height() - 4,
+        )
+
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QColor(T["muted"]))
+        painter.drawText(
+            button_rect,
+            Qt.AlignmentFlag.AlignCenter,
+            "⋮",
+        )
+        painter.end()
+
+    def mouseReleaseEvent(self, event):
+        pos = event.position().toPoint()
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(pos)
+
+            if item is not None:
+                rect = self.visualItemRect(item)
+
+                if pos.x() >= rect.right() - 34:
+                    self.options_clicked.emit(
+                        QPoint(rect.left() + 10, pos.y())
+                    )
+                    event.accept()
+                    return
+
+        super().mouseReleaseEvent(event)
 
 
 # ============================================================
@@ -1369,11 +1495,12 @@ class AIWorker(QThread):
     completed = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, messages, instructions, model):
+    def __init__(self, messages, instructions, model, provider="ollama"):
         super().__init__()
         self.messages = messages
         self.instructions = instructions
         self.model = model
+        self.provider = provider
         self._stop = False
 
     def stop(self):
@@ -1389,45 +1516,85 @@ class AIWorker(QThread):
                     + self.instructions.strip()
                 )
 
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    *self.messages,
-                ],
-                "stream": True,
-            }
-
             answer_parts = []
 
-            with requests.post(
-                OLLAMA_URL,
-                json=payload,
-                stream=True,
-                timeout=(10, 300),
-            ) as response:
-                response.raise_for_status()
+            # Cloud AI: Google Gemini
+            if self.provider == "gemini":
+                api_key = os.getenv("GEMINI_API_KEY")
 
-                for line in response.iter_lines():
+                if not api_key:
+                    raise RuntimeError(
+                        "GEMINI_API_KEY is missing. Configure your API key "
+                        "in the environment, then restart the app."
+                    )
+
+                client = genai.Client(api_key=api_key)
+
+                gemini_messages = [
+                    {
+                        "role": "user" if message["role"] == "user" else "model",
+                        "parts": [{"text": message["content"]}],
+                    }
+                    for message in self.messages
+                ]
+
+                stream = client.models.generate_content_stream(
+                    model=self.model,
+                    contents=gemini_messages,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt
+                    ),
+                )
+
+                for chunk in stream:
                     if self._stop:
                         break
 
-                    if not line:
-                        continue
+                    text = chunk.text or ""
 
-                    packet = json.loads(line.decode("utf-8"))
+                    if text:
+                        answer_parts.append(text)
+                        self.token_received.emit(text)
 
-                    if packet.get("error"):
-                        raise RuntimeError(packet["error"])
+            # Local AI: Ollama
+            else:
+                payload = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        *self.messages,
+                    ],
+                    "stream": True,
+                }
 
-                    chunk = packet.get("message", {}).get("content", "")
+                with requests.post(
+                    OLLAMA_URL,
+                    json=payload,
+                    stream=True,
+                    timeout=(10, 300),
+                ) as response:
+                    response.raise_for_status()
 
-                    if chunk:
-                        answer_parts.append(chunk)
-                        self.token_received.emit(chunk)
+                    for line in response.iter_lines():
+                        if self._stop:
+                            break
 
-                    if packet.get("done"):
-                        break
+                        if not line:
+                            continue
+
+                        packet = json.loads(line.decode("utf-8"))
+
+                        if packet.get("error"):
+                            raise RuntimeError(packet["error"])
+
+                        chunk = packet.get("message", {}).get("content", "")
+
+                        if chunk:
+                            answer_parts.append(chunk)
+                            self.token_received.emit(chunk)
+
+                        if packet.get("done"):
+                            break
 
             answer = "".join(answer_parts)
 
@@ -1437,7 +1604,7 @@ class AIWorker(QThread):
             self.completed.emit(answer)
 
         except Exception as error:
-            self.failed.emit(str(error))
+            self.failed.emit(f"{type(error).__name__}: {error}")
 
 
 class PingWorker(QThread):
@@ -1455,6 +1622,129 @@ class PingWorker(QThread):
 # MAIN WINDOW
 # ============================================================
 
+class CustomTitleBar(QWidget):
+    def __init__(self, window):
+        super().__init__(window)
+        # NOTE: do not name this attribute "window" - that would shadow
+        # QWidget.window() and can cause confusing bugs.
+        self.main_window = window
+        self.drag_position = None
+
+        self.setFixedHeight(38)
+        self.setObjectName("customTitleBar")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 0, 0)
+        layout.setSpacing(0)
+
+        title = QLabel("Ahmad Intelligence")
+        title.setObjectName("customTitle")
+        layout.addWidget(title)
+        layout.addStretch(1)
+
+        self.min_button = QPushButton("—")
+        self.min_button.setObjectName("titleMinButton")
+        self.min_button.setToolTip("Minimize")
+        self.min_button.clicked.connect(window.showMinimized)
+        layout.addWidget(self.min_button)
+
+        self.max_button = QPushButton("□")
+        self.max_button.setObjectName("titleMaxButton")
+        self.max_button.setToolTip("Maximize / Restore")
+        self.max_button.clicked.connect(self.toggle_maximize)
+        layout.addWidget(self.max_button)
+
+        self.close_button = QPushButton("×")
+        self.close_button.setObjectName("titleCloseButton")
+        self.close_button.setToolTip("Close")
+        self.close_button.clicked.connect(window.close)
+        layout.addWidget(self.close_button)
+
+        self.setStyleSheet("""
+            QWidget#customTitleBar {
+                background-color: #171a21;
+                border-bottom: 1px solid #292e38;
+            }
+
+            QLabel#customTitle {
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: 700;
+            }
+
+            QPushButton#titleMinButton,
+            QPushButton#titleMaxButton,
+            QPushButton#titleCloseButton {
+                color: #d1d5db;
+                background-color: transparent;
+                border: none;
+                border-radius: 0;
+                min-width: 46px;
+                max-width: 46px;
+                min-height: 38px;
+                max-height: 38px;
+                font-size: 16px;
+            }
+
+            QPushButton#titleMinButton:hover,
+            QPushButton#titleMaxButton:hover {
+                background-color: #343a46;
+                color: #ffffff;
+            }
+
+            QPushButton#titleCloseButton:hover {
+                background-color: #e81123;
+                color: #ffffff;
+            }
+
+            QPushButton:pressed {
+                background-color: #4b5563;
+            }
+
+            QPushButton#titleCloseButton:pressed {
+                background-color: #b50b1b;
+            }
+        """)
+
+    def toggle_maximize(self):
+        if self.main_window.isMaximized():
+            self.main_window.showNormal()
+            self.max_button.setText("□")
+        else:
+            self.main_window.showMaximized()
+            self.max_button.setText("❐")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = (
+                event.globalPosition().toPoint()
+                - self.main_window.frameGeometry().topLeft()
+            )
+            event.accept()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self.drag_position is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and not self.main_window.isMaximized()
+        ):
+            self.main_window.move(
+                event.globalPosition().toPoint()
+                - self.drag_position
+            )
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.drag_position = None
+        super().mouseReleaseEvent(event)
+
+
 class AhmadIntelligence(QMainWindow):
 
     def __init__(self):
@@ -1466,7 +1756,20 @@ class AhmadIntelligence(QMainWindow):
 
         self.conversation_id = None
         self.current_project_id = "default"
-        self.model_name = MODEL_NAME
+        self.gemini_model_name = "gemini-3.8-flash"
+        self.local_model_name = self.store.get("local_model", MODEL_NAME)
+
+        # Gemini is the default; the choice is remembered once changed.
+        self.provider = self.store.get("provider", "gemini")
+        if self.provider not in ("gemini", "ollama"):
+            self.provider = "gemini"
+
+        self.model_name = (
+            self.gemini_model_name
+            if self.provider == "gemini"
+            else self.local_model_name
+        )
+
         self.busy = False
         self.worker = None
         self._workers = set()
@@ -1486,7 +1789,8 @@ class AhmadIntelligence(QMainWindow):
         initialize_database()
 
         self.setWindowTitle("Ahmad Intelligence")
-        self.resize(1380, 880)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        self.showMaximized()
         self.setMinimumSize(880, 600)
 
         app = QApplication.instance()
@@ -1666,6 +1970,7 @@ class AhmadIntelligence(QMainWindow):
             Qt.ContextMenuPolicy.CustomContextMenu
         )
         self.history.customContextMenuRequested.connect(self.history_menu)
+        self.history.options_clicked.connect(self.history_menu)
         side.addWidget(self.history, 1)
 
         self.bin_button = QPushButton("  Bin")
@@ -1685,6 +1990,10 @@ class AhmadIntelligence(QMainWindow):
         layout = QVBoxLayout(self.workspace)
         layout.setContentsMargins(26, 14, 26, 10)
         layout.setSpacing(10)
+
+        # Custom window title bar
+        self.title_bar = CustomTitleBar(self)
+        layout.addWidget(self.title_bar)
 
         topbar = QHBoxLayout()
         topbar.setSpacing(6)
@@ -1715,7 +2024,7 @@ class AhmadIntelligence(QMainWindow):
         self.model_chip = QLabel()
         self.model_chip.setObjectName("chip")
         self.model_chip.setTextFormat(Qt.TextFormat.RichText)
-        self.model_chip.setToolTip("Active Ollama model")
+        self.model_chip.setToolTip("Active AI model")
         topbar.addWidget(self.model_chip)
         self.refresh_model_chip()
 
@@ -2098,16 +2407,22 @@ class AhmadIntelligence(QMainWindow):
     # --------------------------------------------------------
 
     def refresh_model_chip(self):
-        if self.ollama_ok is None:
-            color = T["muted"]
-        elif self.ollama_ok:
+        if self.provider == "gemini":
             color = T["ok"]
+            provider_label = "Cloud · Gemini 3.8 Flash"
         else:
-            color = T["danger"]
+            if self.ollama_ok is None:
+                color = T["muted"]
+            elif self.ollama_ok:
+                color = T["ok"]
+            else:
+                color = T["danger"]
+
+            provider_label = f"Local · {self.local_model_name}"
 
         self.model_chip.setText(
             f"<span style='color:{color};'>●</span>&nbsp;&nbsp;"
-            f"{html.escape(self.model_name)}"
+            f"{html.escape(provider_label)}"
         )
 
     def start_ping(self):
@@ -2347,7 +2662,6 @@ class AhmadIntelligence(QMainWindow):
             make_icon("folder", "text", 16), "Add to project"
         )
 
-        
         rename_action = menu.addAction(make_icon("edit", "text", 16), "Rename")
         pin_action = menu.addAction(
             make_icon("pin", "text", 16),
@@ -2384,7 +2698,6 @@ class AhmadIntelligence(QMainWindow):
             self.store.toggle_pin(cid)
             self.load_conversations(select_id=self.conversation_id)
 
-        
         elif chosen is export_action:
             self.export_chat(cid, item.text())
 
@@ -2440,7 +2753,6 @@ class AhmadIntelligence(QMainWindow):
 
         elif chosen is bin_action:
             self.trash_conversation(cid)
-
 
     def delete_selected_history(self):
         item = self.history.currentItem()
@@ -2763,7 +3075,6 @@ class AhmadIntelligence(QMainWindow):
         self.msg_layout.insertWidget(
             self.msg_layout.count() - 1, self.stream_bubble
         )
-        fade_in(self.stream_bubble)
 
         messages = [
             {"role": role, "content": content}
@@ -2779,7 +3090,12 @@ class AhmadIntelligence(QMainWindow):
         self.set_busy(True)
         self.status.setText("Thinking…")
 
-        self.worker = AIWorker(messages, instructions, self.model_name)
+        self.worker = AIWorker(
+            messages,
+            instructions,
+            self.model_name,
+            provider=self.provider,
+        )
         self._workers.add(self.worker)
         self.worker.finished.connect(
             lambda w=self.worker: self._worker_done(w)
@@ -2855,18 +3171,33 @@ class AhmadIntelligence(QMainWindow):
         else:
             self._drop_stream_bubble()
 
+        if self.provider == "gemini":
+            troubleshooting = (
+                "Check your internet connection, Gemini model access, "
+                "and GEMINI_API_KEY configuration."
+            )
+            status_text = "Cloud AI unavailable — check Gemini"
+        else:
+            troubleshooting = (
+                "Check that Ollama is running and the model is installed."
+            )
+            status_text = "AI unavailable — check Ollama"
+
         note = ErrorNote(
             "Ahmad Intelligence couldn't complete that request.\n\n"
-            "Check that Ollama is running and the model is installed.\n\n"
+            f"{troubleshooting}\n\n"
             f"Details: {error}"
         )
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, note)
         fade_in(note)
 
         self.current_answer = ""
-        self.ollama_ok = False
+
+        if self.provider == "ollama":
+            self.ollama_ok = False
+
         self.refresh_model_chip()
-        self.status.setText("AI unavailable — check Ollama")
+        self.status.setText(status_text)
         self.finish_response()
 
     def finish_response(self):
@@ -2881,7 +3212,7 @@ class AhmadIntelligence(QMainWindow):
     def open_settings(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Ahmad Intelligence settings")
-        dialog.resize(500, 270)
+        dialog.resize(500, 320)
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 22, 24, 20)
@@ -2892,7 +3223,7 @@ class AhmadIntelligence(QMainWindow):
         layout.addWidget(heading)
 
         description = QLabel(
-            "Select a model already installed in your local Ollama setup."
+            "Choose between local Ollama models and cloud Gemini AI."
         )
         description.setWordWrap(True)
         description.setObjectName("muted")
@@ -2900,9 +3231,16 @@ class AhmadIntelligence(QMainWindow):
 
         form = QFormLayout()
 
+        provider_combo = QComboBox()
+        provider_combo.addItem("Local AI (Ollama)", "ollama")
+        provider_combo.addItem("Cloud AI (Gemini)", "gemini")
+
+        current_provider_index = provider_combo.findData(self.provider)
+        if current_provider_index >= 0:
+            provider_combo.setCurrentIndex(current_provider_index)
+
         model_combo = QComboBox()
         model_combo.setEditable(True)
-        model_combo.addItem(self.model_name)
 
         try:
             response = requests.get(ollama_base() + "/api/tags", timeout=3)
@@ -2913,25 +3251,28 @@ class AhmadIntelligence(QMainWindow):
                 for item in response.json().get("models", [])
                 if item.get("name")
             ]
-
-            if names:
-                model_combo.clear()
-                model_combo.addItems(names)
-
-                if self.model_name in names:
-                    model_combo.setCurrentText(self.model_name)
-                else:
-                    model_combo.setCurrentText(names[0])
-
+            model_combo.addItems(names)
         except requests.RequestException:
             pass
 
+        if model_combo.count() == 0:
+            model_combo.addItem(self.local_model_name)
+
+        if self.local_model_name:
+            model_combo.setCurrentText(self.local_model_name)
+
+        form.addRow("AI provider", provider_combo)
         form.addRow("Ollama model", model_combo)
         layout.addLayout(form)
 
-        note = QLabel("The model must already be downloaded in Ollama.")
+        note = QLabel(
+            "Gemini uses your configured GEMINI_API_KEY. "
+            "Ollama models must already be downloaded."
+        )
+        note.setWordWrap(True)
         note.setObjectName("hint")
         layout.addWidget(note)
+
         layout.addStretch(1)
 
         buttons = QDialogButtonBox(
@@ -2943,12 +3284,24 @@ class AhmadIntelligence(QMainWindow):
         layout.addWidget(buttons)
 
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            chosen = model_combo.currentText().strip()
+            chosen_provider = provider_combo.currentData()
+            chosen_local_model = model_combo.currentText().strip()
 
-            if chosen:
-                self.model_name = chosen
-                self.refresh_model_chip()
-                self.toast.pop(f"Model: {chosen}")
+            self.provider = chosen_provider
+            self.store.set("provider", self.provider)
+
+            if chosen_local_model:
+                self.local_model_name = chosen_local_model
+                self.store.set("local_model", self.local_model_name)
+
+            if self.provider == "gemini":
+                self.model_name = self.gemini_model_name
+                self.toast.pop("Cloud AI: Gemini 3.8 Flash")
+            else:
+                self.model_name = self.local_model_name
+                self.toast.pop(f"Local AI: {self.model_name}")
+
+            self.refresh_model_chip()
 
     # --------------------------------------------------------
     # SHUTDOWN

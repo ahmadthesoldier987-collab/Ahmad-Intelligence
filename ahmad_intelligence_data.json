@@ -1,8 +1,16 @@
 {
-  "trash": {},
+  "trash": {
+    "ba2a297d-6f35-4109-9da9-103ddcda8f6f": {
+      "id": "ba2a297d-6f35-4109-9da9-103ddcda8f6f",
+      "title": "hello",
+      "deleted_at": 1791721486.635811
+    }
+  },
   "purged": [],
   "pinned": [],
   "settings": {
-    "theme": "light"
+    "theme": "light",
+    "provider": "ollama",
+    "local_model": "deepseek-r1:1.5b"
   }
 }
