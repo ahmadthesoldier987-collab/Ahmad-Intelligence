@@ -9,8 +9,14 @@
   "purged": [],
   "pinned": [],
   "settings": {
-    "theme": "light",
+    "theme": "dark",
     "provider": "ollama",
-    "local_model": "deepseek-r1:1.5b"
+    "local_model": "deepseek-r1:1.5b",
+    "sidebar_open": true,
+    "gemini_model": "gemini-3.8-flash",
+    "accent": "Cyber",
+    "font": "Ubuntu",
+    "font_px": 15,
+    "anim_bg": true
   }
 }

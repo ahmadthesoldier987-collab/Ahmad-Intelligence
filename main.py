@@ -5,6 +5,7 @@ import html
 import json
 import math
 import time
+from random import Random
 
 import requests
 from google import genai
@@ -21,18 +22,23 @@ from PySide6.QtCore import (
     QEasingCurve,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
     QSize,
 )
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontDatabase,
+    QFontMetrics,
     QIcon,
     QPixmap,
     QPainter,
     QPainterPath,
     QPolygonF,
     QConicalGradient,
+    QLinearGradient,
+    QRadialGradient,
     QPen,
     QBrush,
     QKeySequence,
@@ -44,11 +50,11 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -63,11 +69,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizeGrip,
     QSizePolicy,
+    QSlider,
     QStackedWidget,
     QTextBrowser,
     QTextEdit,
     QVBoxLayout,
+    QLineEdit as _QLineEdit,
     QWidget,
 )
 
@@ -91,12 +100,30 @@ from ai_engine import OLLAMA_URL, MODEL_NAME, DEFAULT_INSTRUCTIONS
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(APP_DIR, "ahmad_intelligence_data.json")
+FONT_DIR = os.path.join(APP_DIR, "fonts")   # drop .ttf / .otf files here
 TRASH_DAYS = 30
 
-SIDEBAR_W = 300
-EDGE_PX = 3            # how close to the screen edge the pointer must be
-HIDE_SLACK = 16        # extra pixels around the sidebar before it hides
-SERIF = '"Georgia", "Times New Roman", "DejaVu Serif", serif'
+SIDEBAR_W = 296
+HISTORY_LIMIT = 24          # how many past messages are sent to the AI
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+
+# Fonts offered at the top of the font picker (only installed ones appear).
+# Every other font installed on the computer is listed below them.
+FONT_CHOICES = [
+    "Inter", "Space Grotesk", "Sora", "Outfit", "Manrope", "DM Sans",
+    "Plus Jakarta Sans", "Segoe UI", "Roboto", "Open Sans", "Lato",
+    "Montserrat", "Poppins", "Nunito", "Source Sans 3", "Source Sans Pro",
+    "Fira Sans", "IBM Plex Sans", "Work Sans", "Noto Sans", "Ubuntu",
+    "Cantarell", "DejaVu Sans", "Liberation Sans", "Helvetica", "Arial",
+    "Verdana", "Tahoma", "Trebuchet MS", "Calibri", "Orbitron", "Exo 2",
+    "Rajdhani", "Oxanium", "Chakra Petch", "Audiowide", "Georgia",
+    "Merriweather", "Lora", "Playfair Display", "Noto Serif", "DejaVu Serif",
+    "Liberation Serif", "Times New Roman", "Palatino Linotype", "Fira Code",
+    "JetBrains Mono", "Source Code Pro", "DejaVu Sans Mono", "Ubuntu Mono",
+    "Consolas", "Courier New", "Comic Sans MS",
+]
+
+FONT = {"family": ""}       # current UI font family
 
 
 def ollama_base():
@@ -112,35 +139,174 @@ def refresh_style(widget):
 
 
 # ============================================================
-# THEMES  (black / white / grey)
+# FONT HELPERS
 # ============================================================
 
-THEMES = {
+def installed_families():
+    try:
+        families = QFontDatabase.families()
+    except TypeError:
+        families = QFontDatabase().families()
+
+    clean = {name for name in families if name and not name.startswith("@")}
+    return sorted(clean, key=str.casefold)
+
+
+def load_font_files(paths):
+    """Register extra font files so they show up in the font picker."""
+    found = []
+
+    if os.path.isdir(FONT_DIR):
+        for name in sorted(os.listdir(FONT_DIR)):
+            if name.lower().endswith((".ttf", ".otf", ".ttc")):
+                found.append(os.path.join(FONT_DIR, name))
+
+    for path in list(paths or []) + found:
+        if os.path.isfile(path):
+            QFontDatabase.addApplicationFont(path)
+
+
+def pick_default_font():
+    installed = set(installed_families())
+
+    for name in (
+        "Inter", "Space Grotesk", "Sora", "Outfit", "Manrope",
+        "Segoe UI", "Ubuntu", "Noto Sans", "DejaVu Sans",
+    ):
+        if name in installed:
+            return name
+
+    return QApplication.font().family()
+
+
+# ============================================================
+# THEMES  (dark / light  +  neon gradient palettes)
+# ============================================================
+
+def _rgb(color):
+    color = color.lstrip("#")
+    return tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def mix(a, b, t):
+    ra, rb = _rgb(a), _rgb(b)
+    return "#%02x%02x%02x" % tuple(
+        round(x + (y - x) * t) for x, y in zip(ra, rb)
+    )
+
+
+def luminance(color):
+    r, g, b = [v / 255.0 for v in _rgb(color)]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def rgba(color, alpha):
+    """CSS rgba() string, alpha 0-255."""
+    r, g, b = _rgb(color)
+    return f"rgba({r}, {g}, {b}, {int(alpha)})"
+
+
+def qcolor(color, alpha=1.0):
+    c = QColor(color)
+    c.setAlphaF(max(0.0, min(1.0, alpha)))
+    return c
+
+
+BASES = {
     "dark": dict(
-        bg="#0a0a0a", panel="#111111", panel2="#181818", hover="#212121",
-        border="#2b2b2b", border_hi="#454545", text="#ececec",
-        muted="#8e8e8e", faint="#5a5a5a", accent="#f2f2f2",
-        accent_hover="#ffffff", accent_text="#0a0a0a", user_bg="#1b1b1b",
-        danger="#e5646a", ok="#8fd694", code_bg="#101010",
-        code_text="#d6d6d6", select="#3a3a3a",
+        bg="#05060d", panel="#0d0f1a", panel2="#131628", hover="#1b1f36",
+        border="#242a48", border_hi="#363e66", text="#eceffd",
+        muted="#98a0c0", faint="#5c6486", danger="#ff6b81", ok="#4ade80",
+        code_bg="#080a14", code_text="#d3d9f5",
+        glass="rgba(255, 255, 255, 14)",
+        glass_hi="rgba(255, 255, 255, 26)",
+        glass_border="rgba(255, 255, 255, 32)",
+        glass_border_hi="rgba(255, 255, 255, 64)",
+        bar_bg="rgba(5, 6, 13, 110)",
+        side_bg="rgba(8, 10, 24, 150)",
     ),
     "light": dict(
-        bg="#f3f3f1", panel="#ffffff", panel2="#f6f6f4", hover="#ebebe8",
-        border="#dadad6", border_hi="#b4b4af", text="#161616",
-        muted="#666666", faint="#a0a0a0", accent="#141414",
-        accent_hover="#000000", accent_text="#ffffff", user_bg="#e9e9e5",
-        danger="#c2383e", ok="#2f8f46", code_bg="#ecece8",
-        code_text="#222222", select="#cfcfca",
+        bg="#eef0fa", panel="#ffffff", panel2="#f3f5fc", hover="#e6e9f6",
+        border="#d9ddef", border_hi="#bcc3df", text="#12142a",
+        muted="#5a6188", faint="#9aa1c4", danger="#d6334f", ok="#14a05a",
+        code_bg="#e9ecf8", code_text="#242a4a",
+        glass="rgba(255, 255, 255, 150)",
+        glass_hi="rgba(255, 255, 255, 215)",
+        glass_border="rgba(90, 100, 160, 60)",
+        glass_border_hi="rgba(90, 100, 160, 115)",
+        bar_bg="rgba(255, 255, 255, 110)",
+        side_bg="rgba(255, 255, 255, 135)",
     ),
 }
 
-T = dict(THEMES["dark"])          # current theme (mutated in place)
-UI = {"font_px": 15}              # chat text size
+# Parameters used when painting glass panels in code.
+GLASS = {
+    "dark": dict(base="#ffffff", top=0.085, bot=0.032,
+                 edge="#ffffff", b_hi=0.30, b_lo=0.07),
+    "light": dict(base="#ffffff", top=0.88, bot=0.62,
+                  edge="#7f8ab8", b_hi=0.48, b_lo=0.20),
+}
+
+# Three-colour neon gradients.
+NEON = {
+    "Aurora": ("#22d3ee", "#8b5cf6", "#f472b6"),
+    "Cyber": ("#00f5ff", "#6d28d9", "#ff2bd6"),
+    "Sunset": ("#fbbf24", "#fb7185", "#a855f7"),
+    "Matrix": ("#a3e635", "#22c55e", "#14b8a6"),
+    "Ocean": ("#38bdf8", "#6366f1", "#22d3ee"),
+    "Mono": ("#f1f5f9", "#94a3b8", "#e2e8f0"),
+}
+
+T = {}                              # current theme (mutated in place)
+MODE = {"name": "dark", "accent": "Aurora"}
+UI = {"font_px": 15}                # chat text size
 
 
-def set_theme(name):
+def neon_colors(name, mode):
+    colors = NEON.get(name, NEON["Aurora"])
+
+    if mode == "light":
+        colors = tuple(mix(c, "#000000", 0.22) for c in colors)
+
+    return colors
+
+
+def set_theme(mode, accent="Aurora"):
+    mode = mode if mode in BASES else "dark"
+    accent = accent if accent in NEON else "Aurora"
+    g1, g2, g3 = neon_colors(accent, mode)
+
+    theme = dict(BASES[mode])
+    theme["g1"], theme["g2"], theme["g3"] = g1, g2, g3
+    theme["accent"] = g1
+    theme["accent_hover"] = mix(
+        g1, "#ffffff" if mode == "dark" else "#000000", 0.2
+    )
+    theme["accent_deep"] = mix(g2, "#000000", 0.4)
+    theme["accent_text"] = (
+        "#ffffff" if luminance(mix(g1, g2, 0.5)) < 0.5 else "#06070d"
+    )
+    theme["accent_soft"] = mix(theme["panel"], g1, 0.16)
+    theme["user_bg"] = mix(theme["panel2"], g2, 0.2)
+    theme["select"] = mix(theme["panel"], g2, 0.4)
+
+    theme["primary_grad"] = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+        f"stop:0 {g1}, stop:1 {g2})"
+    )
+    theme["sel_grad"] = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+        f"stop:0 {rgba(g1, 70)}, stop:1 {rgba(g2, 18)})"
+    )
+    theme["hov_grad"] = (
+        "qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+        f"stop:0 {rgba(g1, 30)}, stop:1 {rgba(g2, 6)})"
+    )
+
     T.clear()
-    T.update(THEMES.get(name, THEMES["dark"]))
+    T.update(theme)
+    MODE["name"] = mode
+    MODE["accent"] = accent
 
 
 STYLE_TEMPLATE = """
@@ -148,35 +314,49 @@ QMainWindow { background-color: @bg@; }
 
 QWidget {
     color: @text@;
-    font-family: "Segoe UI", "Inter", "Noto Sans", "Ubuntu", "DejaVu Sans", sans-serif;
+    font-family: "@font@", "Segoe UI", "Ubuntu", "Noto Sans", "DejaVu Sans", sans-serif;
     font-size: 13px;
 }
 
 QToolTip {
-    background-color: @panel@;
+    background-color: @panel2@;
     color: @text@;
     border: 1px solid @border_hi@;
-    padding: 4px 8px;
+    border-radius: 6px;
+    padding: 5px 9px;
 }
 
 QWidget#chatContent { background: transparent; }
 QScrollArea { background: transparent; border: none; }
 QStackedWidget { background: transparent; }
 
+/* ---------- Title bar ---------- */
+QFrame#titleBar {
+    background-color: @bar_bg@;
+    border: none;
+    border-bottom: 1px solid @glass_border@;
+}
+QLabel#titleText { font-weight: 600; color: @muted@; font-size: 12px; }
+
+QPushButton#winBtn, QPushButton#winClose {
+    background-color: transparent;
+    border: none;
+    border-radius: 0px;
+    padding: 0;
+    min-width: 46px; max-width: 46px;
+    min-height: 40px; max-height: 40px;
+}
+QPushButton#winBtn:hover { background-color: @glass_hi@; }
+QPushButton#winClose:hover { background-color: #e81123; }
+
 /* ---------- Sidebar ---------- */
 QFrame#sidebar {
-    background-color: @panel@;
+    background-color: @side_bg@;
     border: none;
-    border-right: 1px solid @border_hi@;
-    border-radius: 0px;
+    border-right: 1px solid @glass_border@;
 }
 
-QLabel#brand {
-    font-family: @serif@;
-    font-size: 17px;
-    font-weight: 700;
-    color: @text@;
-}
+QLabel#brand { font-size: 15px; font-weight: 700; color: @text@; }
 QLabel#brandSub { font-size: 11px; color: @muted@; }
 
 QLabel#section {
@@ -186,86 +366,80 @@ QLabel#section {
     padding-top: 6px;
 }
 
-QLabel#title {
-    font-family: @serif@;
-    font-size: 18px;
-    font-weight: 700;
-    color: @text@;
-}
-QLabel#hero {
-    font-family: @serif@;
-    font-size: 36px;
-    font-weight: 600;
-    color: @text@;
-}
+QLabel#title { font-size: 18px; font-weight: 700; color: @text@; }
+QLabel#greeting { font-size: 14px; font-weight: 600; color: @accent@; }
 QLabel#heroSub { font-size: 14px; color: @muted@; }
 QLabel#muted { color: @muted@; font-size: 12px; }
 QLabel#status { color: @faint@; font-size: 11px; }
 QLabel#hint { color: @faint@; font-size: 11px; }
 QLabel#assistantName { color: @muted@; font-size: 12px; font-weight: 700; }
-QLabel#dialogTitle {
-    font-family: @serif@;
-    font-size: 20px;
-    font-weight: 700;
-    color: @text@;
-}
+QLabel#dialogTitle { font-size: 20px; font-weight: 700; color: @text@; }
+QLabel#pageTitle { font-size: 22px; font-weight: 700; color: @text@; }
 QLabel#cardTitle { font-size: 14px; font-weight: 600; color: @text@; }
 QLabel#cardDesc { font-size: 12px; color: @muted@; }
 QLabel#binEmpty { color: @faint@; font-size: 13px; }
+QLabel#okNote { color: @ok@; font-size: 12px; }
+QLabel#warnNote { color: @danger@; font-size: 12px; }
+QLabel#paletteHint { color: @faint@; font-size: 11px; }
 
 QLabel#cardIcon {
-    background-color: @panel2@;
-    border: 1px solid @border@;
-    border-radius: 10px;
+    background: @primary_grad@;
+    border: none;
+    border-radius: 12px;
 }
 
 QLabel#chip {
-    background-color: @panel2@;
-    border: 1px solid @border@;
-    border-radius: 12px;
-    padding: 5px 12px;
+    background-color: @glass@;
+    border: 1px solid @glass_border@;
+    border-radius: 14px;
+    padding: 5px 13px;
     color: @muted@;
     font-size: 12px;
 }
+QLabel#chip:hover { border-color: @accent@; color: @text@; }
 
 QLabel#localStatus {
-    border: 1px solid @border@;
-    border-radius: 8px;
-    padding: 8px 10px;
+    background-color: @glass@;
+    border: 1px solid @glass_border@;
+    border-radius: 12px;
+    padding: 9px 11px;
     color: @muted@;
     font-size: 11px;
 }
 
+QLabel#fontPreview {
+    background-color: @glass@;
+    border: 1px solid @glass_border@;
+    border-radius: 14px;
+    padding: 14px 16px;
+}
+
 /* ---------- Buttons ---------- */
 QPushButton {
-    background-color: @panel2@;
+    background-color: @glass@;
     color: @text@;
-    border: 1px solid @border@;
-    border-radius: 8px;
-    padding: 8px 12px;
+    border: 1px solid @glass_border@;
+    border-radius: 11px;
+    padding: 8px 14px;
     font-weight: 600;
 }
-QPushButton:hover { background-color: @hover@; border-color: @border_hi@; }
+QPushButton:hover { background-color: @glass_hi@; border-color: @glass_border_hi@; }
 QPushButton:pressed { background-color: @border@; }
 QPushButton:disabled {
     color: @faint@;
-    background-color: @panel@;
-    border-color: @border@;
+    background-color: @glass@;
+    border-color: @glass_border@;
 }
 
 QPushButton#primary {
-    background-color: @accent@;
+    background: @primary_grad@;
     color: @accent_text@;
-    border: 1px solid @accent@;
+    border: none;
     font-weight: 700;
-    padding: 10px 12px;
+    padding: 10px 14px;
 }
-QPushButton#primary:hover { background-color: @accent_hover@; }
-QPushButton#primary:disabled {
-    background-color: @panel2@;
-    color: @faint@;
-    border-color: @border@;
-}
+QPushButton#primary:hover { background: @accent_hover@; }
+QPushButton#primary:disabled { background-color: @glass@; color: @faint@; }
 
 QPushButton#nav {
     background-color: transparent;
@@ -275,58 +449,55 @@ QPushButton#nav {
     font-weight: 500;
     color: @text@;
 }
-QPushButton#nav:hover { background-color: @hover@; border-color: @border@; }
-
-QPushButton#icon {
-    background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 0;
-}
-QPushButton#icon:hover { background-color: @hover@; border-color: @border@; }
-QPushButton#icon[on="true"] { background-color: @hover@; border-color: @border_hi@; }
+QPushButton#nav:hover { background: @hov_grad@; border-color: @glass_border@; }
 
 QPushButton#ghost {
     background-color: transparent;
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 3px 8px;
     color: @muted@;
     font-size: 11px;
     font-weight: 600;
 }
-QPushButton#ghost:hover { background-color: @hover@; color: @text@; }
-
-QPushButton#sendBtn, QPushButton#stopBtn {
-    background-color: @accent@;
-    border: none;
-    border-radius: 17px;
-    padding: 0;
-}
-QPushButton#sendBtn:hover, QPushButton#stopBtn:hover { background-color: @accent_hover@; }
-QPushButton#sendBtn:disabled { background-color: @panel2@; }
+QPushButton#ghost:hover { background-color: @glass_hi@; color: @text@; }
 
 QPushButton#jump {
-    background-color: @panel@;
+    background-color: @panel2@;
     border: 1px solid @border_hi@;
     border-radius: 18px;
     padding: 0;
 }
-QPushButton#jump:hover { background-color: @hover@; }
+QPushButton#jump:hover { background-color: @hover@; border-color: @accent@; }
 
 QPushButton#danger { color: @danger@; }
 QPushButton#danger:hover { border-color: @danger@; }
 
+QPushButton#seg {
+    background-color: @glass@;
+    border: 1px solid @glass_border@;
+    border-radius: 12px;
+    padding: 10px 22px;
+    color: @muted@;
+    font-weight: 600;
+}
+QPushButton#seg:hover { background-color: @glass_hi@; color: @text@; }
+QPushButton#seg:checked {
+    background: @sel_grad@;
+    border: 1px solid @accent@;
+    color: @text@;
+}
+
 /* ---------- Inputs ---------- */
 QLineEdit, QComboBox, QTextEdit {
-    background-color: @panel2@;
+    background-color: @glass@;
     color: @text@;
-    border: 1px solid @border@;
-    border-radius: 8px;
-    padding: 8px 11px;
+    border: 1px solid @glass_border@;
+    border-radius: 11px;
+    padding: 8px 12px;
     selection-background-color: @select@;
 }
-QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid @muted@; }
+QLineEdit:focus, QComboBox:focus, QTextEdit:focus { border: 1px solid @accent@; }
 
 QComboBox QAbstractItemView {
     background-color: @panel@;
@@ -351,36 +522,41 @@ QTextBrowser#bubbleText {
     selection-background-color: @select@;
 }
 
+QLineEdit#paletteInput {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid @glass_border@;
+    border-radius: 0px;
+    padding: 14px 16px;
+    font-size: 16px;
+}
+
+QSlider::groove:horizontal {
+    height: 4px;
+    background: @border_hi@;
+    border-radius: 2px;
+}
+QSlider::sub-page:horizontal { background: @primary_grad@; border-radius: 2px; }
+QSlider::handle:horizontal {
+    background: @accent@;
+    width: 16px; height: 16px;
+    margin: -6px 0;
+    border-radius: 8px;
+}
+
 /* ---------- Chat ---------- */
-QFrame#userCard {
-    background-color: @user_bg@;
-    border: 1px solid @border@;
-    border-radius: 14px;
-    border-bottom-right-radius: 4px;
-}
-
 QFrame#errorCard {
-    background-color: @panel@;
+    background-color: @glass@;
     border: 1px solid @danger@;
-    border-radius: 10px;
-}
-
-QFrame#card {
-    background-color: @panel@;
-    border: 1px solid @border@;
-    border-radius: 12px;
-}
-QFrame#card[hover="true"] {
-    background-color: @panel2@;
-    border: 1px solid @border_hi@;
+    border-radius: 14px;
 }
 
 QLabel#toast {
-    background-color: @accent@;
+    background: @primary_grad@;
     color: @accent_text@;
-    border-radius: 10px;
-    padding: 9px 18px;
-    font-weight: 600;
+    border-radius: 14px;
+    padding: 10px 22px;
+    font-weight: 700;
 }
 
 /* ---------- Lists ---------- */
@@ -393,34 +569,54 @@ QListWidget {
 QListWidget::item {
     background-color: transparent;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: 11px;
     padding: 9px 8px;
     margin: 1px 0;
 }
-QListWidget::item:hover { background-color: @hover@; color: @text@; }
+QListWidget::item:hover { background: @hov_grad@; color: @text@; }
 QListWidget::item:selected {
-    background-color: @hover@;
+    background: @sel_grad@;
     color: @text@;
-    border-color: @border_hi@;
+    border-color: @glass_border_hi@;
 }
+
+QFrame#settingsSide {
+    background-color: @glass@;
+    border: none;
+    border-right: 1px solid @glass_border@;
+}
+QListWidget#settingsNav { color: @text@; }
+QListWidget#settingsNav::item { padding: 11px 12px; margin: 2px 0; }
+
+QListWidget#fontList {
+    background-color: @glass@;
+    border: 1px solid @glass_border@;
+    border-radius: 14px;
+    color: @text@;
+    padding: 4px;
+}
+QListWidget#fontList::item { padding: 8px 10px; }
+
+QListWidget#paletteList { color: @text@; padding: 6px; }
+QListWidget#paletteList::item { padding: 11px 12px; }
 
 /* ---------- Menus & dialogs ---------- */
 QMenu {
     background-color: @panel@;
     border: 1px solid @border_hi@;
-    border-radius: 8px;
-    padding: 5px;
+    border-radius: 12px;
+    padding: 6px;
 }
-QMenu::item { padding: 8px 22px 8px 10px; border-radius: 6px; }
+QMenu::item { padding: 8px 22px 8px 10px; border-radius: 8px; }
 QMenu::item:selected { background-color: @hover@; }
 QMenu::separator { height: 1px; background: @border@; margin: 5px 6px; }
 
-QDialog, QMessageBox, QInputDialog { background-color: @panel@; }
+QMessageBox, QInputDialog { background-color: @panel@; }
 
 /* ---------- Scrollbars ---------- */
 QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; }
 QScrollBar::handle:vertical {
-    background-color: @border_hi@;
+    background-color: @glass_border_hi@;
     border-radius: 3px;
     min-height: 30px;
 }
@@ -431,7 +627,9 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 
 
 def build_style():
-    style = STYLE_TEMPLATE.replace("@serif@", SERIF)
+    style = STYLE_TEMPLATE.replace(
+        "@font@", (FONT["family"] or "Segoe UI").replace('"', "")
+    )
     for key, value in T.items():
         style = style.replace(f"@{key}@", value)
     return style
@@ -447,11 +645,11 @@ def apply_palette(app):
         QPalette.ColorRole.Text: T["text"],
         QPalette.ColorRole.Button: T["panel2"],
         QPalette.ColorRole.ButtonText: T["text"],
-        QPalette.ColorRole.ToolTipBase: T["panel"],
+        QPalette.ColorRole.ToolTipBase: T["panel2"],
         QPalette.ColorRole.ToolTipText: T["text"],
         QPalette.ColorRole.Highlight: T["select"],
         QPalette.ColorRole.HighlightedText: T["text"],
-        QPalette.ColorRole.Link: T["text"],
+        QPalette.ColorRole.Link: T["accent"],
         QPalette.ColorRole.PlaceholderText: T["faint"],
     }
     for role, color in roles.items():
@@ -605,6 +803,22 @@ def draw_icon(p, name, color):
         poly((15, 8), (19, 10), (19, 14), (15, 16), (8, 16))
     elif name == "close":
         line(6, 6, 18, 18); line(18, 6, 6, 18)
+    elif name == "minimize":
+        line(6, 17, 18, 17)
+    elif name == "maximize":
+        p.drawRoundedRect(QRectF(6, 6, 12, 12), 1.5, 1.5)
+    elif name == "restore_win":
+        p.drawRoundedRect(QRectF(5, 9, 10, 10), 1.5, 1.5)
+        poly((9, 9), (9, 5), (19, 5), (19, 15), (15, 15))
+    elif name == "gear":
+        p.drawEllipse(QPointF(12, 12), 3.2, 3.2)
+        p.drawEllipse(QPointF(12, 12), 7, 7)
+        for i in range(8):
+            a = i * math.pi / 4
+            line(12 + 7 * math.cos(a), 12 + 7 * math.sin(a),
+                 12 + 9.6 * math.cos(a), 12 + 9.6 * math.sin(a))
+    elif name == "bolt":
+        shape((13, 3), (6, 13), (11, 13), (10, 21), (18, 10), (13, 10))
     elif name == "tune":
         line(4, 7, 20, 7); line(4, 12, 20, 12); line(4, 17, 20, 17)
         p.setBrush(QColor(color))
@@ -647,6 +861,14 @@ def draw_icon(p, name, color):
     elif name == "bulb":
         p.drawEllipse(QPointF(12, 10), 5.5, 5.5)
         line(9.5, 18, 14.5, 18); line(10.5, 21, 13.5, 21)
+    elif name == "type":
+        line(5, 6, 19, 6); line(12, 6, 12, 19); line(9, 19, 15, 19)
+    elif name == "palette":
+        p.drawEllipse(QPointF(12, 12), 8, 8)
+        p.setBrush(QColor(color))
+        p.drawEllipse(QPointF(8.5, 10), 1.2, 1.2)
+        p.drawEllipse(QPointF(12, 7.5), 1.2, 1.2)
+        p.drawEllipse(QPointF(15.5, 10), 1.2, 1.2)
     elif name == "sparkle":
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(color))
@@ -654,8 +876,8 @@ def draw_icon(p, name, color):
     elif name == "more":
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(color))
-        for x in (6, 12, 18):
-            p.drawEllipse(QPointF(x, 12), 1.8, 1.8)
+        for y in (6, 12, 18):
+            p.drawEllipse(QPointF(12, y), 1.8, 1.8)
 
 
 _ICON_CACHE = {}
@@ -709,39 +931,345 @@ def sparkle_path(cx, cy, r):
 
 
 # ============================================================
-# CUSTOM WIDGETS
+# ANIMATION HELPERS
 # ============================================================
 
-class Logo(QWidget):
-    def __init__(self, size=34):
+def fade_in(widget, duration=300, delay=0):
+    """Fade a widget in (optionally after a delay), then drop the effect."""
+    effect = QGraphicsOpacityEffect(widget)
+    effect.setOpacity(0.0)
+    widget.setGraphicsEffect(effect)
+
+    animation = QPropertyAnimation(effect, b"opacity", widget)
+    animation.setDuration(duration)
+    animation.setStartValue(0.0)
+    animation.setEndValue(1.0)
+    animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def finished():
+        try:
+            widget.setGraphicsEffect(None)
+        except RuntimeError:
+            pass
+
+    animation.finished.connect(finished)
+
+    def start():
+        try:
+            animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        except RuntimeError:
+            pass
+
+    if delay > 0:
+        QTimer.singleShot(delay, start)
+    else:
+        start()
+
+
+class FadeDialog(QDialog):
+    """Dialog with a glowing background that fades in when it opens."""
+
+    def showEvent(self, event):
+        super().showEvent(event)
+
+        if not getattr(self, "_faded", False):
+            self._faded = True
+            self.setWindowOpacity(0.0)
+            self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+            self._fade.setDuration(190)
+            self._fade.setStartValue(0.0)
+            self._fade.setEndValue(1.0)
+            self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._fade.start()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(T["panel"]))
+
+        w, h = self.width(), self.height()
+
+        glow = QRadialGradient(QPointF(w * 0.12, -h * 0.05), w * 0.85)
+        glow.setColorAt(0.0, qcolor(T["g2"], 0.26))
+        glow.setColorAt(1.0, qcolor(T["g2"], 0.0))
+        painter.fillRect(self.rect(), QBrush(glow))
+
+        glow2 = QRadialGradient(QPointF(w * 0.95, h * 1.05), w * 0.8)
+        glow2.setColorAt(0.0, qcolor(T["g1"], 0.18))
+        glow2.setColorAt(1.0, qcolor(T["g1"], 0.0))
+        painter.fillRect(self.rect(), QBrush(glow2))
+
+
+# ============================================================
+# FUTURISTIC WIDGETS
+# ============================================================
+
+class Backdrop(QWidget):
+    """Animated aurora background with floating particles."""
+
+    resized = Signal()
+
+    def __init__(self):
         super().__init__()
-        self.setFixedSize(size, size)
+        self.t = 0.0
+        self.animated = False
+        self._cache = None
+
+        rnd = Random(11)
+        self.particles = [
+            (rnd.random(), rnd.random(), rnd.uniform(0.8, 2.2),
+             rnd.uniform(0.004, 0.016), rnd.uniform(0, 6.28))
+            for _ in range(46)
+        ]
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(45)
+        self.timer.timeout.connect(self._tick)
+
+    def set_animated(self, on):
+        if on == self.animated:
+            return
+
+        self.animated = on
+
+        if on:
+            self.timer.start()
+        else:
+            self.timer.stop()
+
+    def invalidate(self):
+        self._cache = None
+        self.update()
+
+    def _tick(self):
+        self.t += 0.045
+        self._cache = None
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._cache = None
+        self.resized.emit()
+
+    def _build_cache(self):
+        scale = 4
+        w = max(2, self.width() // scale + 1)
+        h = max(2, self.height() // scale + 1)
+
+        pixmap = QPixmap(w, h)
+        pixmap.fill(QColor(T["bg"]))
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        dark = MODE["name"] == "dark"
+        alpha = 0.36 if dark else 0.28
+        big = max(w, h)
+        t = self.t
+
+        blobs = (
+            (T["g1"], 0.18, 0.22, 0.16, 0.14, 0.62, 0.0),
+            (T["g2"], 0.82, 0.18, 0.14, 0.18, 0.68, 2.1),
+            (T["g3"], 0.70, 0.92, 0.18, 0.10, 0.60, 4.2),
+            (T["g2"], 0.08, 0.90, 0.12, 0.14, 0.50, 1.3),
+        )
+
+        for color, bx, by, ax, ay, radius, phase in blobs:
+            cx = w * (bx + ax * math.sin(t * 0.35 + phase))
+            cy = h * (by + ay * math.cos(t * 0.29 + phase * 1.3))
+
+            gradient = QRadialGradient(QPointF(cx, cy), big * radius)
+            gradient.setColorAt(0.0, qcolor(color, alpha))
+            gradient.setColorAt(1.0, qcolor(color, 0.0))
+            painter.fillRect(QRectF(0, 0, w, h), QBrush(gradient))
+
+        vignette = QRadialGradient(QPointF(w / 2, h / 2), big * 0.80)
+        vignette.setColorAt(0.55, qcolor(T["bg"], 0.0))
+        vignette.setColorAt(1.0, qcolor(T["bg"], 0.55 if dark else 0.35))
+        painter.fillRect(QRectF(0, 0, w, h), QBrush(vignette))
+
+        painter.end()
+        return pixmap
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        if self._cache is None:
+            self._cache = self._build_cache()
+
+        painter.drawPixmap(self.rect(), self._cache)
+
+        # floating particles
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        w, h = self.width(), self.height()
+        dark = MODE["name"] == "dark"
+        base = "#ffffff" if dark else T["g2"]
+
+        for px, py, radius, speed, phase in self.particles:
+            x = (px + 0.02 * math.sin(self.t * 0.5 + phase)) % 1.0
+            y = (py - self.t * speed) % 1.0
+            twinkle = 0.5 + 0.5 * math.sin(self.t * 1.6 + phase)
+            painter.setBrush(qcolor(base, 0.10 + 0.35 * twinkle))
+            painter.drawEllipse(QPointF(x * w, y * h), radius, radius)
+
+
+class GlassPanel(QFrame):
+    """Frosted-glass panel with a gradient border and optional neon glow."""
+
+    def __init__(self, radius=18, strength=1.0, tint=0.0, solid=0.0,
+                 parent=None):
+        super().__init__(parent)
+        self.radius = radius
+        self.strength = strength
+        self.tint = tint
+        self.solid = solid
+        self.glow = 0.0
+
+    def body_path(self):
+        rect = QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75)
+        path = QPainterPath()
+        path.addRoundedRect(rect, self.radius, self.radius)
+        return rect, path
+
+    def draw_body(self, painter):
+        rect, path = self.body_path()
+        glass = GLASS[MODE["name"]]
+
+        if self.solid > 0:
+            painter.fillPath(path, qcolor(T["panel"], self.solid))
+
+        fill = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        fill.setColorAt(
+            0.0,
+            qcolor(glass["base"], glass["top"] * self.strength + 0.05 * self.glow),
+        )
+        fill.setColorAt(1.0, qcolor(glass["base"], glass["bot"] * self.strength))
+        painter.fillPath(path, QBrush(fill))
+
+        if self.tint > 0:
+            tint = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            tint.setColorAt(0.0, qcolor(T["g1"], self.tint * 0.55))
+            tint.setColorAt(1.0, qcolor(T["g2"], self.tint * 0.35))
+            painter.fillPath(path, QBrush(tint))
+
+        return rect, path
+
+    def draw_border(self, painter, rect, path):
+        glass = GLASS[MODE["name"]]
+
+        border = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        border.setColorAt(0.0, qcolor(glass["edge"], glass["b_hi"]))
+        border.setColorAt(1.0, qcolor(glass["edge"], glass["b_lo"]))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QBrush(border), 1.1))
+        painter.drawPath(path)
+
+        if self.glow > 0.01:
+            neon = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            neon.setColorAt(0.0, qcolor(T["g1"], 0.95 * self.glow))
+            neon.setColorAt(0.5, qcolor(T["g2"], 0.85 * self.glow))
+            neon.setColorAt(1.0, qcolor(T["g3"], 0.75 * self.glow))
+            painter.setPen(QPen(QBrush(neon), 1.5))
+            painter.drawPath(path)
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect, path = self.draw_body(painter)
+        self.draw_border(painter, rect, path)
+
+
+class Orb(QWidget):
+    """Glowing AI core: pulsing sphere inside a rotating neon ring."""
+
+    def __init__(self, size=34, animated=False):
+        super().__init__()
+        self.setFixedSize(size, size)
+        self.animated = animated
+        self.t = 0.0
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(33)
+        self.timer.timeout.connect(self._tick)
+
+    def set_animated(self, on):
+        self.animated = on
+
+        if on and self.isVisible():
+            self.timer.start()
+        else:
+            self.timer.stop()
+
+        self.update()
+
+    def _tick(self):
+        self.t += 0.033
+        self.update()
+
+    def showEvent(self, event):
+        if self.animated:
+            self.timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self.timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
         s = self.width()
+        center = QPointF(s / 2, s / 2)
+        pulse = 0.5 + 0.5 * math.sin(self.t * 2.2)
 
+        # outer aura
+        aura = QRadialGradient(center, s * 0.5)
+        aura.setColorAt(0.45, qcolor(T["g2"], 0.30 + 0.25 * pulse))
+        aura.setColorAt(1.0, qcolor(T["g2"], 0.0))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(T["accent"]))
-        painter.drawRoundedRect(QRectF(0, 0, s, s), s * 0.26, s * 0.26)
+        painter.setBrush(QBrush(aura))
+        painter.drawEllipse(center, s / 2, s / 2)
 
-        painter.setBrush(QColor(T["accent_text"]))
-        painter.drawPath(sparkle_path(s * 0.47, s * 0.53, s * 0.27))
-        painter.drawPath(sparkle_path(s * 0.76, s * 0.25, s * 0.1))
+        # rotating neon ring
+        radius = s * 0.34
+        ring = QConicalGradient(center, -self.t * 110.0)
+        ring.setColorAt(0.0, QColor(T["g1"]))
+        ring.setColorAt(0.33, QColor(T["g2"]))
+        ring.setColorAt(0.66, QColor(T["g3"]))
+        ring.setColorAt(1.0, QColor(T["g1"]))
+        painter.setPen(QPen(QBrush(ring), max(1.4, s * 0.06)))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(center, radius * 1.18, radius * 1.18)
+
+        # glowing core
+        core_radius = radius * (0.82 + 0.05 * pulse)
+        core = QRadialGradient(
+            QPointF(center.x() - radius * 0.28, center.y() - radius * 0.34),
+            core_radius * 1.6,
+        )
+        core.setColorAt(0.0, QColor(255, 255, 255, 245))
+        core.setColorAt(0.30, QColor(T["g1"]))
+        core.setColorAt(1.0, QColor(T["accent_deep"]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(core))
+        painter.drawEllipse(center, core_radius, core_radius)
 
 
-class TypingDots(QWidget):
+class ThinkingBars(QWidget):
+    """Animated equaliser bars shown while the AI is thinking."""
+
     def __init__(self):
         super().__init__()
-        self.setFixedSize(52, 22)
-        self.phase = 0
+        self.setFixedSize(60, 24)
+        self.t = 0.0
         self.timer = QTimer(self)
-        self.timer.setInterval(70)
+        self.timer.setInterval(45)
         self.timer.timeout.connect(self._tick)
 
     def _tick(self):
-        self.phase = (self.phase + 1) % 1000
+        self.t += 0.045
         self.update()
 
     def showEvent(self, event):
@@ -757,53 +1285,310 @@ class TypingDots(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
 
-        for i in range(3):
-            wave = 0.5 + 0.5 * math.sin(self.phase * 0.28 - i * 1.1)
-            color = QColor(T["muted"])
-            color.setAlphaF(0.25 + 0.75 * wave)
+        for i in range(6):
+            wave = 0.5 + 0.5 * math.sin(self.t * 7.0 - i * 0.9)
+            height = 5 + 15 * wave
+            color = QColor(mix(T["g1"], T["g3"], i / 5.0))
             painter.setBrush(color)
-            radius = 3.2 + 1.4 * wave
-            painter.drawEllipse(QPointF(10 + i * 16, 11), radius, radius)
+            painter.drawRoundedRect(
+                QRectF(4 + i * 9, (24 - height) / 2, 4, height), 2, 2
+            )
 
 
-class Backdrop(QWidget):
-    resized = Signal()
+class GradientLabel(QWidget):
+    """Text painted with the neon gradient."""
 
-    def paintEvent(self, _event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(T["bg"]))
+    def __init__(self, text, px=36, bold=True, center=True):
+        super().__init__()
+        self.text = text
+        self.px = px
+        self.bold = bold
+        self.center = center
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.updateGeometry()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self.resized.emit()
+    def _font(self):
+        self.ensurePolished()
+        font = QFont(self.font())
+        font.setPixelSize(self.px)
+        font.setBold(self.bold)
+        return font
 
+    def set_text(self, text):
+        self.text = text
+        self.updateGeometry()
+        self.update()
 
-class EdgeHint(QWidget):
-    """A faint marker on the left edge: the sidebar lives behind it."""
-
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.active = True
-
-    def paintEvent(self, _event):
-        if not self.active:
-            return
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        color = QColor(T["muted"])
-        color.setAlpha(110)
-        painter.setBrush(color)
-        painter.drawRoundedRect(
-            QRectF(0, self.height() / 2 - 28, 3, 56), 1.5, 1.5
+    def sizeHint(self):
+        metrics = QFontMetrics(self._font())
+        return QSize(
+            metrics.horizontalAdvance(self.text) + 10, metrics.height() + 10
         )
 
+    def minimumSizeHint(self):
+        return QSize(10, self.sizeHint().height())
 
-class ComposerFrame(QFrame):
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._font())
+
+        gradient = QLinearGradient(0, 0, max(1, self.width()), 0)
+        gradient.setColorAt(0.0, QColor(T["g1"]))
+        gradient.setColorAt(0.55, QColor(T["g2"]))
+        gradient.setColorAt(1.0, QColor(T["g3"]))
+        painter.setPen(QPen(QBrush(gradient), 1))
+
+        flags = (
+            Qt.AlignmentFlag.AlignCenter
+            if self.center
+            else Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+        )
+        painter.drawText(QRectF(self.rect()), flags, self.text)
+
+
+class NeonButton(QPushButton):
+    """Gradient button with a soft glow that reacts to the mouse."""
+
+    def __init__(self, text="", circular=False):
+        super().__init__(text)
+        self.circular = circular
+        self.hover = 0.0
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        self.hover_anim = QVariantAnimation(self)
+        self.hover_anim.setDuration(180)
+        self.hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.hover_anim.valueChanged.connect(self._set_hover)
+
+        if not circular:
+            self.setMinimumHeight(44)
+
+    def _set_hover(self, value):
+        self.hover = float(value)
+        self.update()
+
+    def _animate_to(self, target):
+        self.hover_anim.stop()
+        self.hover_anim.setStartValue(self.hover)
+        self.hover_anim.setEndValue(target)
+        self.hover_anim.start()
+
+    def enterEvent(self, event):
+        self._animate_to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._animate_to(0.0)
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(4, 4, -4, -4)
+        radius = rect.height() / 2 if self.circular else 13
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        enabled = self.isEnabled()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        if enabled:
+            for width, alpha in ((8, 0.05), (5.5, 0.08), (3, 0.13)):
+                painter.setPen(
+                    QPen(
+                        qcolor(T["g1"], alpha * (1.0 + 2.4 * self.hover)),
+                        width,
+                    )
+                )
+                painter.drawPath(path)
+
+            fill = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            fill.setColorAt(0.0, QColor(T["g1"]))
+            fill.setColorAt(1.0, QColor(T["g2"]))
+            painter.fillPath(path, QBrush(fill))
+
+            gloss = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            gloss.setColorAt(0.0, QColor(255, 255, 255, 70))
+            gloss.setColorAt(0.55, QColor(255, 255, 255, 0))
+            painter.fillPath(path, QBrush(gloss))
+
+            if self.isDown():
+                painter.fillPath(path, QColor(0, 0, 0, 55))
+        else:
+            painter.fillPath(path, qcolor("#ffffff", 0.06))
+            painter.setPen(QPen(qcolor("#ffffff", 0.10), 1))
+            painter.drawPath(path)
+
+        # icon + text
+        text = self.text().strip()
+        icon = self.icon()
+        icon_size = self.iconSize()
+        icon_w = icon_size.width() if not icon.isNull() else 0
+
+        font = QFont(self.font())
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        text_w = metrics.horizontalAdvance(text) if text else 0
+        gap = 8 if (text_w and icon_w) else 0
+        total = icon_w + gap + text_w
+        x = rect.center().x() - total / 2.0
+
+        if icon_w:
+            target = QRect(
+                int(x),
+                int(rect.center().y() - icon_size.height() / 2),
+                icon_size.width(),
+                icon_size.height(),
+            )
+            mode = QIcon.Mode.Normal if enabled else QIcon.Mode.Disabled
+            icon.paint(painter, target, Qt.AlignmentFlag.AlignCenter, mode)
+            x += icon_w + gap
+
+        if text_w:
+            painter.setFont(font)
+            painter.setPen(
+                QColor(T["accent_text"] if enabled else T["faint"])
+            )
+            painter.drawText(
+                QRectF(x, rect.top(), text_w + 6, rect.height()),
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                text,
+            )
+
+
+class IconButton(QPushButton):
+    """Round glass icon button with an animated hover glow."""
+
     def __init__(self):
         super().__init__()
+        self.hover = 0.0
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        self.hover_anim = QVariantAnimation(self)
+        self.hover_anim.setDuration(160)
+        self.hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.hover_anim.valueChanged.connect(self._set_hover)
+
+    def _set_hover(self, value):
+        self.hover = float(value)
+        self.update()
+
+    def _animate_to(self, target):
+        self.hover_anim.stop()
+        self.hover_anim.setStartValue(self.hover)
+        self.hover_anim.setEndValue(target)
+        self.hover_anim.start()
+
+    def enterEvent(self, event):
+        self._animate_to(1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._animate_to(0.0)
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        radius = min(rect.width(), rect.height()) * 0.32
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+
+        glass = GLASS[MODE["name"]]
+
+        if self.hover > 0.01 and self.isEnabled():
+            painter.fillPath(
+                path, qcolor(glass["base"], 0.10 * self.hover + 0.02)
+            )
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(
+                QPen(qcolor(T["g1"], 0.65 * self.hover), 1.2)
+            )
+            painter.drawPath(path)
+
+        size = self.iconSize()
+        target = QRect(0, 0, size.width(), size.height())
+        target.moveCenter(self.rect().center())
+        mode = QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled
+        self.icon().paint(painter, target, Qt.AlignmentFlag.AlignCenter, mode)
+
+
+class ChipLabel(QLabel):
+    """A label that behaves like a button (used for the model chip)."""
+
+    clicked = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+    def mouseReleaseEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class ThemeSwatch(QPushButton):
+    """Gradient preview tile used to pick a colour theme."""
+
+    def __init__(self, name, mode):
+        super().__init__()
+        self.name = name
+        self.mode = mode
+        self.setCheckable(True)
+        self.setFixedSize(136, 64)
+        self.setToolTip(name)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        g1, g2, g3 = neon_colors(self.name, self.mode)
+        rect = QRectF(self.rect()).adjusted(3, 3, -3, -3)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 15, 15)
+
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0.0, QColor(g1))
+        gradient.setColorAt(0.55, QColor(g2))
+        gradient.setColorAt(1.0, QColor(g3))
+        painter.fillPath(path, QBrush(gradient))
+
+        gloss = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        gloss.setColorAt(0.0, QColor(255, 255, 255, 60))
+        gloss.setColorAt(0.6, QColor(255, 255, 255, 0))
+        painter.fillPath(path, QBrush(gloss))
+
+        font = QFont(self.font())
+        font.setBold(True)
+        font.setPixelSize(13)
+        painter.setFont(font)
+
+        dark_text = luminance(mix(g1, g2, 0.5)) > 0.6
+        painter.setPen(QColor("#06070d" if dark_text else "#ffffff"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.name)
+
+        if self.isChecked():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(T["text"]), 2.2))
+            painter.drawRoundedRect(
+                QRectF(self.rect()).adjusted(1.5, 1.5, -1.5, -1.5), 17, 17
+            )
+
+
+class ComposerFrame(GlassPanel):
+    def __init__(self):
+        super().__init__(radius=24, strength=1.2, solid=0.35)
         self.focused = False
         self.glowing = False
         self.angle = 0.0
@@ -825,33 +1610,39 @@ class ComposerFrame(QFrame):
         self.update()
 
     def _spin(self):
-        self.angle = (self.angle - 5.0) % 360
+        self.angle = (self.angle - 6.0) % 360
         self.update()
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect, path = self.draw_body(painter)
 
-        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        path = QPainterPath()
-        path.addRoundedRect(rect, 16, 16)
-
-        painter.fillPath(path, QColor(T["panel"]))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
         if self.glowing:
-            gradient = QConicalGradient(rect.center(), self.angle)
-            gradient.setColorAt(0.0, QColor(T["accent"]))
-            gradient.setColorAt(0.4, QColor(T["border"]))
-            gradient.setColorAt(0.75, QColor(T["border"]))
-            gradient.setColorAt(1.0, QColor(T["accent"]))
-            pen = QPen(QBrush(gradient), 1.8)
-        elif self.focused:
-            pen = QPen(QColor(T["muted"]), 1.3)
-        else:
-            pen = QPen(QColor(T["border_hi"]), 1.0)
+            conic = QConicalGradient(rect.center(), self.angle)
+            conic.setColorAt(0.0, QColor(T["g1"]))
+            conic.setColorAt(0.33, QColor(T["g2"]))
+            conic.setColorAt(0.66, QColor(T["g3"]))
+            conic.setColorAt(1.0, QColor(T["g1"]))
 
-        painter.setPen(pen)
-        painter.drawPath(path)
+            painter.setPen(QPen(qcolor(T["g2"], 0.10), 8))
+            painter.drawPath(path)
+            painter.setPen(QPen(QBrush(conic), 2.2))
+            painter.drawPath(path)
+        elif self.focused:
+            neon = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            neon.setColorAt(0.0, QColor(T["g1"]))
+            neon.setColorAt(0.5, QColor(T["g2"]))
+            neon.setColorAt(1.0, QColor(T["g3"]))
+
+            painter.setPen(QPen(qcolor(T["g2"], 0.10), 7))
+            painter.drawPath(path)
+            painter.setPen(QPen(QBrush(neon), 1.7))
+            painter.drawPath(path)
+        else:
+            self.draw_border(painter, rect, path)
 
 
 class GrowingTextEdit(QTextEdit):
@@ -923,7 +1714,7 @@ class AutoText(QTextBrowser):
             "p { margin-top: 0px; margin-bottom: 8px; }"
             "li { margin-bottom: 3px; }"
             f"h1, h2, h3 {{ color: {T['text']}; }}"
-            f"a {{ color: {T['text']}; }}"
+            f"a {{ color: {T['accent']}; }}"
             "code, pre { font-family: Consolas, 'DejaVu Sans Mono', monospace;"
             f" color: {T['code_text']}; background-color: {T['code_bg']}; }}"
         )
@@ -970,8 +1761,6 @@ class AutoText(QTextBrowser):
             if height != self.height():
                 self.setFixedHeight(height)
 
-            # The view must never be scrolled inside its own bubble,
-            # otherwise the first lines look "cut off" at the top.
             bar = self.verticalScrollBar()
             if bar.value() != 0:
                 bar.setValue(0)
@@ -981,12 +1770,7 @@ class AutoText(QTextBrowser):
     def _refit_later(self):
         self._fit_height()
         QTimer.singleShot(0, self._fit_height)
-        QTimer.singleShot(60, self._fit_height)
-        QTimer.singleShot(200, self._fit_height)
-
-    def wheelEvent(self, event):
-        # Let the chat scroll area handle the wheel, not this text view.
-        event.ignore()
+        QTimer.singleShot(120, self._fit_height)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -995,6 +1779,10 @@ class AutoText(QTextBrowser):
     def showEvent(self, event):
         super().showEvent(event)
         self._refit_later()
+
+    def wheelEvent(self, event):
+        # Let the chat scroll area handle the wheel, not this text view.
+        event.ignore()
 
     # ---- content ------------------------------------------------
 
@@ -1014,7 +1802,32 @@ class AutoText(QTextBrowser):
     def set_markdown(self, text):
         self._sync_font()
         self.setMarkdown(text)
+
+        if "```" in text:
+            self._style_code_blocks()
+
         self._refit_later()
+
+    def _style_code_blocks(self):
+        try:
+            document = self.document()
+            cursor = QTextCursor(document)
+            cursor.beginEditBlock()
+            block = document.begin()
+
+            while block.isValid():
+                block_format = block.blockFormat()
+
+                if block_format.nonBreakableLines():
+                    block_format.setBackground(QColor(T["code_bg"]))
+                    cursor.setPosition(block.position())
+                    cursor.setBlockFormat(block_format)
+
+                block = block.next()
+
+            cursor.endEditBlock()
+        except Exception:
+            pass
 
     def sizeHint(self):
         if self.shrink and self.natural_width:
@@ -1080,20 +1893,11 @@ class HistoryList(QListWidget):
             return
 
         rect = self.visualItemRect(item)
-        button_rect = QRectF(
-            rect.right() - 34,
-            rect.top() + 2,
-            30,
-            rect.height() - 4,
-        )
-
         painter = QPainter(self.viewport())
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor(T["muted"]))
-        painter.drawText(
-            button_rect,
-            Qt.AlignmentFlag.AlignCenter,
-            "⋮",
+        icon = make_icon("more", "muted", 16)
+        icon.paint(
+            painter,
+            QRect(rect.right() - 28, rect.center().y() - 8, 16, 16),
         )
         painter.end()
 
@@ -1116,6 +1920,21 @@ class HistoryList(QListWidget):
         super().mouseReleaseEvent(event)
 
 
+class SidebarHost(QWidget):
+    """Clips the sidebar so it can slide open and closed smoothly."""
+
+    def __init__(self, width):
+        super().__init__()
+        self.full_width = width
+        self.inner = QFrame(self)
+        self.inner.setObjectName("sidebar")
+        self.setFixedWidth(width)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.inner.setGeometry(0, 0, self.full_width, self.height())
+
+
 # ============================================================
 # CHAT WIDGETS
 # ============================================================
@@ -1127,10 +1946,9 @@ class UserBubble(QWidget):
         row.setContentsMargins(0, 8, 0, 8)
         row.addStretch(1)
 
-        card = QFrame()
-        card.setObjectName("userCard")
+        card = GlassPanel(radius=20, strength=1.0, tint=0.32)
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 11, 16, 11)
+        card_layout.setContentsMargins(18, 12, 18, 12)
 
         self.text = AutoText(shrink=True, max_width=620)
         self.text.set_plain(text)
@@ -1147,10 +1965,18 @@ class AssistantBubble(QWidget):
         self.raw = text
         self.waiting = streaming
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 10, 0, 10)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 6, 0, 6)
+
+        panel = GlassPanel(radius=22, strength=0.6)
+        outer.addWidget(panel)
+
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(16, 14, 18, 10)
         row.setSpacing(14)
-        row.addWidget(Logo(28), 0, Qt.AlignmentFlag.AlignTop)
+
+        self.orb = Orb(34, animated=streaming)
+        row.addWidget(self.orb, 0, Qt.AlignmentFlag.AlignTop)
 
         column = QVBoxLayout()
         column.setContentsMargins(0, 0, 0, 0)
@@ -1160,7 +1986,7 @@ class AssistantBubble(QWidget):
         name.setObjectName("assistantName")
         column.addWidget(name)
 
-        self.dots = TypingDots()
+        self.dots = ThinkingBars()
         column.addWidget(self.dots, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.body = AutoText()
@@ -1202,6 +2028,7 @@ class AssistantBubble(QWidget):
         self.dots.hide()
         self.body.show()
         self.copy_button.show()
+        self.orb.set_animated(False)
 
 
 class ErrorNote(QFrame):
@@ -1220,25 +2047,30 @@ class ErrorNote(QFrame):
         layout.addWidget(label)
 
 
-class SuggestionCard(QFrame):
+class SuggestionCard(GlassPanel):
+    """Welcome card with a smooth animated neon hover."""
+
     clicked = Signal(str)
 
     def __init__(self, icon_name, title, description, prompt):
-        super().__init__()
-        self.setObjectName("card")
+        super().__init__(radius=20, strength=1.0)
         self.prompt = prompt
         self.icon_name = icon_name
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setProperty("hover", False)
+
+        self.hover_anim = QVariantAnimation(self)
+        self.hover_anim.setDuration(190)
+        self.hover_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.hover_anim.valueChanged.connect(self._set_glow)
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(16, 14, 16, 14)
-        row.setSpacing(14)
+        row.setContentsMargins(18, 17, 18, 17)
+        row.setSpacing(15)
 
         self.icon_label = QLabel()
         self.icon_label.setObjectName("cardIcon")
         self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.icon_label.setFixedSize(40, 40)
+        self.icon_label.setFixedSize(44, 44)
         row.addWidget(self.icon_label, 0, Qt.AlignmentFlag.AlignTop)
 
         text_column = QVBoxLayout()
@@ -1256,19 +2088,27 @@ class SuggestionCard(QFrame):
         row.addLayout(text_column, 1)
         self.retheme()
 
+    def _set_glow(self, value):
+        self.glow = float(value)
+        self.update()
+
+    def _animate_to(self, target):
+        self.hover_anim.stop()
+        self.hover_anim.setStartValue(self.glow)
+        self.hover_anim.setEndValue(target)
+        self.hover_anim.start()
+
     def retheme(self):
         self.icon_label.setPixmap(
-            make_icon(self.icon_name, "text", 20).pixmap(QSize(20, 20))
+            make_icon(self.icon_name, "accent_text", 21).pixmap(QSize(21, 21))
         )
 
     def enterEvent(self, event):
-        self.setProperty("hover", True)
-        refresh_style(self)
+        self._animate_to(1.0)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self.setProperty("hover", False)
-        refresh_style(self)
+        self._animate_to(0.0)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
@@ -1289,7 +2129,7 @@ class Toast(QLabel):
         self.setGraphicsEffect(self.effect)
 
         self.animation = QPropertyAnimation(self.effect, b"opacity", self)
-        self.animation.setDuration(200)
+        self.animation.setDuration(220)
         self.animation.finished.connect(self._animation_done)
 
         self.timer = QTimer(self)
@@ -1306,7 +2146,7 @@ class Toast(QLabel):
         parent = self.parentWidget()
         self.move(
             (parent.width() - self.width()) // 2,
-            parent.height() - self.height() - 118,
+            parent.height() - self.height() - 138,
         )
 
         self.show()
@@ -1316,7 +2156,7 @@ class Toast(QLabel):
         self.animation.setStartValue(self.effect.opacity())
         self.animation.setEndValue(1.0)
         self.animation.start()
-        self.timer.start(2100)
+        self.timer.start(2200)
 
     def _fade_out(self):
         self.hiding = True
@@ -1330,33 +2170,160 @@ class Toast(QLabel):
             self.hide()
 
 
-def fade_in(widget, duration=300):
-    effect = QGraphicsOpacityEffect(widget)
-    effect.setOpacity(0.0)
-    widget.setGraphicsEffect(effect)
+# ============================================================
+# COMMAND PALETTE  (Ctrl+P)
+# ============================================================
 
-    animation = QPropertyAnimation(effect, b"opacity", widget)
-    animation.setDuration(duration)
-    animation.setStartValue(0.0)
-    animation.setEndValue(1.0)
-    animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-    animation.finished.connect(lambda: widget.setGraphicsEffect(None))
-    animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+class PaletteInput(_QLineEdit):
+    move_selection = Signal(int)
+    run_requested = Signal()
+    close_requested = Signal()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+
+        if key == Qt.Key.Key_Down:
+            self.move_selection.emit(1)
+            return
+        if key == Qt.Key.Key_Up:
+            self.move_selection.emit(-1)
+            return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.run_requested.emit()
+            return
+        if key == Qt.Key.Key_Escape:
+            self.close_requested.emit()
+            return
+
+        super().keyPressEvent(event)
+
+
+class CommandPalette(QWidget):
+    """Spotlight-style overlay to run any action from the keyboard."""
+
+    def __init__(self, window):
+        super().__init__(window.root)
+        self.win = window
+        self.actions = []
+        self.hide()
+
+        self.panel = GlassPanel(radius=24, strength=1.4, solid=0.94, parent=self)
+        self.panel.setFixedSize(580, 440)
+
+        layout = QVBoxLayout(self.panel)
+        layout.setContentsMargins(6, 6, 6, 10)
+        layout.setSpacing(0)
+
+        self.input = PaletteInput()
+        self.input.setObjectName("paletteInput")
+        self.input.setPlaceholderText("Type a command…")
+        self.input.textChanged.connect(self.refresh_list)
+        self.input.move_selection.connect(self._move)
+        self.input.run_requested.connect(self.run_selected)
+        self.input.close_requested.connect(self.close_palette)
+        layout.addWidget(self.input)
+
+        self.list = QListWidget()
+        self.list.setObjectName("paletteList")
+        self.list.setIconSize(QSize(18, 18))
+        self.list.itemClicked.connect(lambda _item: self.run_selected())
+        layout.addWidget(self.list, 1)
+
+        hint = QLabel("↑ ↓ to move   ·   Enter to run   ·   Esc to close")
+        hint.setObjectName("paletteHint")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+
+    def open_palette(self):
+        self.setGeometry(self.parentWidget().rect())
+        self._place_panel()
+        self.actions = self.win.palette_actions()
+        self.input.clear()
+        self.refresh_list()
+        self.show()
+        self.raise_()
+        self.input.setFocus()
+        fade_in(self, 170)
+
+    def close_palette(self):
+        self.hide()
+        self.win.message_input.setFocus()
+
+    def _place_panel(self):
+        self.panel.move(
+            (self.width() - self.panel.width()) // 2,
+            max(30, int(self.height() * 0.14)),
+        )
+
+    def reposition(self):
+        if self.isVisible():
+            self.setGeometry(self.parentWidget().rect())
+            self._place_panel()
+
+    def refresh_list(self, *_args):
+        needle = self.input.text().strip().casefold()
+        self.list.clear()
+
+        for title, shortcut, icon_name, callback in self.actions:
+            if needle and needle not in title.casefold():
+                continue
+
+            label = f"{title}      {shortcut}" if shortcut else title
+            item = QListWidgetItem(make_icon(icon_name, "text", 18), label)
+            item.setData(Qt.ItemDataRole.UserRole, callback)
+            self.list.addItem(item)
+
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _move(self, step):
+        count = self.list.count()
+
+        if not count:
+            return
+
+        row = (self.list.currentRow() + step) % count
+        self.list.setCurrentRow(row)
+
+    def run_selected(self):
+        item = self.list.currentItem()
+
+        if item is None:
+            return
+
+        callback = item.data(Qt.ItemDataRole.UserRole)
+        self.close_palette()
+        QTimer.singleShot(0, callback)
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        color = (
+            QColor(3, 4, 10, 175)
+            if MODE["name"] == "dark"
+            else QColor(235, 238, 250, 170)
+        )
+        painter.fillRect(self.rect(), color)
+
+    def mousePressEvent(self, event):
+        if not self.panel.geometry().contains(event.position().toPoint()):
+            self.close_palette()
+            return
+        super().mousePressEvent(event)
 
 
 # ============================================================
 # BIN DIALOG
 # ============================================================
 
-class BinDialog(QDialog):
+class BinDialog(FadeDialog):
     def __init__(self, window):
         super().__init__(window)
         self.win = window
         self.setWindowTitle("Bin")
-        self.resize(540, 480)
+        self.resize(580, 520)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setContentsMargins(28, 26, 28, 22)
         layout.setSpacing(12)
 
         heading = QLabel("Bin")
@@ -1484,6 +2451,492 @@ class BinDialog(QDialog):
             for entry in list(self.win.store.trashed()):
                 self.win.purge_chat(entry["id"])
             self.refresh()
+
+
+# ============================================================
+# SETTINGS DIALOG  (Model / Appearance / Font)
+# ============================================================
+
+class SettingsDialog(FadeDialog):
+    def __init__(self, win, page=0):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("Settings")
+        self.resize(900, 640)
+        self.setMinimumSize(760, 560)
+
+        self.theme_name = MODE["name"]
+        self.accent_name = MODE["accent"]
+        self.font_family = FONT["family"]
+        self.font_px = UI["font_px"]
+        self.anim_bg = win.bg_enabled
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ---- left navigation
+        side = QFrame()
+        side.setObjectName("settingsSide")
+        side.setFixedWidth(220)
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(16, 26, 16, 18)
+        side_layout.setSpacing(6)
+
+        title = QLabel("Settings")
+        title.setObjectName("dialogTitle")
+        side_layout.addWidget(title)
+        side_layout.addSpacing(10)
+
+        self.nav = QListWidget()
+        self.nav.setObjectName("settingsNav")
+        self.nav.setIconSize(QSize(18, 18))
+
+        for label, icon_name in (
+            ("Model", "sparkle"),
+            ("Appearance", "palette"),
+            ("Font", "type"),
+        ):
+            item = QListWidgetItem(make_icon(icon_name, "text", 18), "  " + label)
+            self.nav.addItem(item)
+
+        side_layout.addWidget(self.nav, 1)
+        root.addWidget(side)
+
+        # ---- right: pages + buttons
+        right = QVBoxLayout()
+        right.setContentsMargins(32, 28, 32, 22)
+        right.setSpacing(14)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._model_page())
+        self.pages.addWidget(self._appearance_page())
+        self.pages.addWidget(self._font_page())
+        right.addWidget(self.pages, 1)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        buttons.addStretch(1)
+
+        cancel = QPushButton("Cancel")
+        cancel.setMinimumHeight(40)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+
+        save = NeonButton("Save changes")
+        save.setMinimumWidth(170)
+        save.clicked.connect(self.accept)
+        buttons.addWidget(save)
+
+        right.addLayout(buttons)
+        root.addLayout(right, 1)
+
+        self.nav.currentRowChanged.connect(self._change_page)
+        self.nav.setCurrentRow(page)
+
+    # ---- helpers
+
+    def _change_page(self, row):
+        if row < 0:
+            return
+        self.pages.setCurrentIndex(row)
+        fade_in(self.pages.currentWidget(), 230)
+
+    def _heading(self, title, subtitle):
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 6)
+        layout.setSpacing(2)
+
+        head = QLabel(title)
+        head.setObjectName("pageTitle")
+        layout.addWidget(head)
+
+        sub = QLabel(subtitle)
+        sub.setObjectName("muted")
+        sub.setWordWrap(True)
+        layout.addWidget(sub)
+        return box
+
+    def _caption(self, text):
+        label = QLabel(text)
+        label.setObjectName("section")
+        return label
+
+    def _seg_button(self, text, group, checked=False):
+        button = QPushButton(text)
+        button.setObjectName("seg")
+        button.setCheckable(True)
+        button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        group.addButton(button)
+        button.setChecked(checked)
+        return button
+
+    # ---- pages
+
+    def _model_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(
+            self._heading("Model", "Choose where the answers come from.")
+        )
+
+        layout.addWidget(self._caption("PROVIDER"))
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        self.provider_group = QButtonGroup(self)
+        self.provider_group.setExclusive(True)
+        self.btn_gemini = self._seg_button(
+            "Cloud  ·  Gemini", self.provider_group,
+            self.win.provider == "gemini",
+        )
+        self.btn_ollama = self._seg_button(
+            "Local  ·  Ollama", self.provider_group,
+            self.win.provider != "gemini",
+        )
+        row.addWidget(self.btn_gemini)
+        row.addWidget(self.btn_ollama)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        layout.addSpacing(8)
+        layout.addWidget(self._caption("GEMINI MODEL"))
+        self.gemini_edit = QLineEdit(self.win.gemini_model_name)
+        self.gemini_edit.setPlaceholderText(DEFAULT_GEMINI_MODEL)
+        layout.addWidget(self.gemini_edit)
+
+        if os.getenv("GEMINI_API_KEY"):
+            key_note = QLabel("●  GEMINI_API_KEY was found.")
+            key_note.setObjectName("okNote")
+        else:
+            key_note = QLabel(
+                "●  GEMINI_API_KEY is not set. Run  export GEMINI_API_KEY="
+                "\"your-key\"  in the terminal before starting the app."
+            )
+            key_note.setObjectName("warnNote")
+        key_note.setWordWrap(True)
+        layout.addWidget(key_note)
+
+        layout.addSpacing(8)
+        layout.addWidget(self._caption("OLLAMA MODEL"))
+
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+
+        try:
+            response = requests.get(ollama_base() + "/api/tags", timeout=3)
+            response.raise_for_status()
+            names = [
+                item.get("name", "")
+                for item in response.json().get("models", [])
+                if item.get("name")
+            ]
+            self.model_combo.addItems(names)
+        except Exception:
+            pass
+
+        if self.model_combo.count() == 0:
+            self.model_combo.addItem(self.win.local_model_name)
+
+        self.model_combo.setCurrentText(self.win.local_model_name)
+        layout.addWidget(self.model_combo)
+
+        hint = QLabel("Ollama models must already be downloaded on this computer.")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        layout.addStretch(1)
+        return page
+
+    def _appearance_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(
+            self._heading("Appearance", "Pick a mode and a neon colour theme.")
+        )
+
+        layout.addWidget(self._caption("MODE"))
+        row = QHBoxLayout()
+        row.setSpacing(10)
+
+        self.theme_group = QButtonGroup(self)
+        self.theme_group.setExclusive(True)
+        self.btn_dark = self._seg_button(
+            "Dark", self.theme_group, self.theme_name == "dark"
+        )
+        self.btn_light = self._seg_button(
+            "Light", self.theme_group, self.theme_name == "light"
+        )
+        self.btn_dark.clicked.connect(lambda: self._set_mode_choice("dark"))
+        self.btn_light.clicked.connect(lambda: self._set_mode_choice("light"))
+        row.addWidget(self.btn_dark)
+        row.addWidget(self.btn_light)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        layout.addSpacing(10)
+        layout.addWidget(self._caption("COLOUR THEME"))
+
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        self.swatches = []
+        self.swatch_group = QButtonGroup(self)
+        self.swatch_group.setExclusive(True)
+
+        for index, name in enumerate(NEON):
+            swatch = ThemeSwatch(name, self.theme_name)
+            swatch.setChecked(name == self.accent_name)
+            swatch.clicked.connect(
+                lambda _checked=False, n=name: self._set_accent_choice(n)
+            )
+            self.swatch_group.addButton(swatch)
+            self.swatches.append(swatch)
+            grid.addWidget(swatch, index // 3, index % 3)
+
+        grid.setColumnStretch(3, 1)
+        layout.addLayout(grid)
+
+        layout.addSpacing(10)
+        layout.addWidget(self._caption("ANIMATED BACKGROUND"))
+        bg_row = QHBoxLayout()
+        bg_row.setSpacing(10)
+
+        self.bg_group = QButtonGroup(self)
+        self.bg_group.setExclusive(True)
+        self.btn_bg_on = self._seg_button("On", self.bg_group, self.anim_bg)
+        self.btn_bg_off = self._seg_button("Off", self.bg_group, not self.anim_bg)
+        self.btn_bg_on.clicked.connect(lambda: self._set_bg_choice(True))
+        self.btn_bg_off.clicked.connect(lambda: self._set_bg_choice(False))
+        bg_row.addWidget(self.btn_bg_on)
+        bg_row.addWidget(self.btn_bg_off)
+        bg_row.addStretch(1)
+        layout.addLayout(bg_row)
+
+        note = QLabel(
+            "The aurora and particles move on the welcome screen. "
+            "Turn it off to save battery. Changes apply when you save."
+        )
+        note.setObjectName("hint")
+        note.setWordWrap(True)
+        layout.addSpacing(4)
+        layout.addWidget(note)
+
+        layout.addStretch(1)
+        return page
+
+    def _set_mode_choice(self, name):
+        self.theme_name = name
+        for swatch in self.swatches:
+            swatch.mode = name
+            swatch.update()
+
+    def _set_accent_choice(self, name):
+        self.accent_name = name
+
+    def _set_bg_choice(self, value):
+        self.anim_bg = value
+
+    def _font_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(
+            self._heading(
+                "Font",
+                "Choose the font for the whole app and the size of chat text.",
+            )
+        )
+
+        self.font_search = QLineEdit()
+        self.font_search.setPlaceholderText("Search fonts…")
+        self.font_search.setClearButtonEnabled(True)
+        self.font_search.textChanged.connect(self._filter_fonts)
+        layout.addWidget(self.font_search)
+
+        self.font_list = QListWidget()
+        self.font_list.setObjectName("fontList")
+        self.font_list.setVerticalScrollMode(
+            QListWidget.ScrollMode.ScrollPerPixel
+        )
+        layout.addWidget(self.font_list, 1)
+
+        self.font_count = QLabel("")
+        self.font_count.setObjectName("hint")
+        self._fill_fonts()
+        self.font_list.currentItemChanged.connect(self._font_selected)
+        self._select_current_font()
+        layout.addWidget(self.font_count)
+
+        self.font_preview = QLabel(
+            "The quick brown fox jumps over the lazy dog.\n"
+            "0123456789  ·  Ahmad Intelligence"
+        )
+        self.font_preview.setObjectName("fontPreview")
+        self.font_preview.setWordWrap(True)
+        self.font_preview.setMinimumHeight(84)
+        layout.addWidget(self.font_preview)
+
+        size_row = QHBoxLayout()
+        size_row.setSpacing(12)
+        size_row.addWidget(QLabel("Chat text size"))
+
+        self.size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.size_slider.setRange(12, 22)
+        self.size_slider.setValue(self.font_px)
+        self.size_slider.valueChanged.connect(self._size_changed)
+        size_row.addWidget(self.size_slider, 1)
+
+        self.size_label = QLabel(f"{self.font_px} px")
+        self.size_label.setMinimumWidth(44)
+        size_row.addWidget(self.size_label)
+
+        add_font = QPushButton("Add font file…")
+        add_font.clicked.connect(self._add_font_file)
+        size_row.addWidget(add_font)
+        layout.addLayout(size_row)
+
+        self._update_preview()
+        return page
+
+    # ---- font list logic
+
+    def _fill_fonts(self):
+        self.font_list.blockSignals(True)
+        self.font_list.clear()
+
+        installed = installed_families()
+        installed_set = set(installed)
+        suggested = [name for name in FONT_CHOICES if name in installed_set]
+        suggested_set = set(suggested)
+        others = [name for name in installed if name not in suggested_set]
+
+        def add_header(text):
+            item = QListWidgetItem(text)
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            small = QFont()
+            small.setPixelSize(10)
+            small.setBold(True)
+            item.setFont(small)
+            item.setForeground(QColor(T["faint"]))
+            self.font_list.addItem(item)
+
+        def add_font(family):
+            item = QListWidgetItem(family)
+            preview = QFont(family)
+            preview.setPixelSize(17)
+            item.setFont(preview)
+            item.setData(Qt.ItemDataRole.UserRole, family)
+            self.font_list.addItem(item)
+
+        if suggested:
+            add_header("SUGGESTED")
+            for family in suggested:
+                add_font(family)
+
+        if others:
+            add_header("ALL INSTALLED FONTS")
+            for family in others:
+                add_font(family)
+
+        self.font_list.blockSignals(False)
+        self.font_count.setText(
+            f"{len(installed)} fonts available. "
+            "Use “Add font file…” to install more (.ttf / .otf)."
+        )
+
+    def _select_current_font(self):
+        for index in range(self.font_list.count()):
+            item = self.font_list.item(index)
+
+            if item.data(Qt.ItemDataRole.UserRole) == self.font_family:
+                self.font_list.setCurrentItem(item)
+                self.font_list.scrollToItem(
+                    item, QAbstractItemView.ScrollHint.PositionAtCenter
+                )
+                return
+
+    def _filter_fonts(self, text):
+        needle = text.strip().casefold()
+
+        for index in range(self.font_list.count()):
+            item = self.font_list.item(index)
+            family = item.data(Qt.ItemDataRole.UserRole)
+
+            if family is None:  # section header
+                item.setHidden(bool(needle))
+            else:
+                item.setHidden(bool(needle) and needle not in family.casefold())
+
+    def _font_selected(self, current, _previous):
+        if current is None:
+            return
+
+        family = current.data(Qt.ItemDataRole.UserRole)
+
+        if family:
+            self.font_family = family
+            self._update_preview()
+
+    def _size_changed(self, value):
+        self.font_px = value
+        self.size_label.setText(f"{value} px")
+        self._update_preview()
+
+    def _update_preview(self):
+        family = (self.font_family or "").replace('"', "")
+        self.font_preview.setStyleSheet(
+            f'font-family: "{family}"; font-size: {self.font_px}px;'
+        )
+
+    def _add_font_file(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Add font files",
+            os.path.expanduser("~"),
+            "Fonts (*.ttf *.otf *.ttc)",
+        )
+
+        added = 0
+
+        for path in paths:
+            if QFontDatabase.addApplicationFont(path) != -1:
+                self.win.remember_font_file(path)
+                added += 1
+
+        if paths and not added:
+            QMessageBox.warning(
+                self, "Font not added", "Those files could not be loaded."
+            )
+            return
+
+        if added:
+            self._fill_fonts()
+            self._select_current_font()
+            self.win.toast.pop(f"{added} font(s) added")
+
+    # ---- result
+
+    def values(self):
+        return {
+            "provider": "gemini" if self.btn_gemini.isChecked() else "ollama",
+            "local_model": self.model_combo.currentText().strip(),
+            "gemini_model": self.gemini_edit.text().strip(),
+            "theme": self.theme_name,
+            "accent": self.accent_name,
+            "font": self.font_family,
+            "font_px": self.font_px,
+            "anim_bg": self.anim_bg,
+        }
 
 
 # ============================================================
@@ -1619,103 +3072,96 @@ class PingWorker(QThread):
 
 
 # ============================================================
-# MAIN WINDOW
+# WINDOW CHROME
 # ============================================================
 
-class CustomTitleBar(QWidget):
+class CustomTitleBar(QFrame):
     def __init__(self, window):
         super().__init__(window)
-        # NOTE: do not name this attribute "window" - that would shadow
-        # QWidget.window() and can cause confusing bugs.
+        # NOTE: not called "window" - that would shadow QWidget.window().
         self.main_window = window
         self.drag_position = None
 
-        self.setFixedHeight(38)
-        self.setObjectName("customTitleBar")
+        self.setObjectName("titleBar")
+        self.setFixedHeight(40)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 0, 0)
+        layout.setContentsMargins(14, 0, 0, 0)
         layout.setSpacing(0)
 
+        layout.addWidget(Orb(24))
+        layout.addSpacing(10)
+
         title = QLabel("Ahmad Intelligence")
-        title.setObjectName("customTitle")
+        title.setObjectName("titleText")
         layout.addWidget(title)
         layout.addStretch(1)
 
-        self.min_button = QPushButton("—")
-        self.min_button.setObjectName("titleMinButton")
-        self.min_button.setToolTip("Minimize")
-        self.min_button.clicked.connect(window.showMinimized)
+        self.min_button = self._win_button(
+            "Minimize", window.showMinimized
+        )
         layout.addWidget(self.min_button)
 
-        self.max_button = QPushButton("□")
-        self.max_button.setObjectName("titleMaxButton")
-        self.max_button.setToolTip("Maximize / Restore")
-        self.max_button.clicked.connect(self.toggle_maximize)
+        self.max_button = self._win_button(
+            "Maximize / Restore", self.toggle_maximize
+        )
         layout.addWidget(self.max_button)
 
-        self.close_button = QPushButton("×")
-        self.close_button.setObjectName("titleCloseButton")
-        self.close_button.setToolTip("Close")
-        self.close_button.clicked.connect(window.close)
+        self.close_button = self._win_button(
+            "Close", window.close, close=True
+        )
         layout.addWidget(self.close_button)
 
-        self.setStyleSheet("""
-            QWidget#customTitleBar {
-                background-color: #171a21;
-                border-bottom: 1px solid #292e38;
-            }
+        self.retheme()
 
-            QLabel#customTitle {
-                color: #ffffff;
-                font-size: 16px;
-                font-weight: 700;
-            }
+    def _win_button(self, tooltip, slot, close=False):
+        button = QPushButton()
+        button.setObjectName("winClose" if close else "winBtn")
+        button.setToolTip(tooltip)
+        button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        button.clicked.connect(slot)
+        return button
 
-            QPushButton#titleMinButton,
-            QPushButton#titleMaxButton,
-            QPushButton#titleCloseButton {
-                color: #d1d5db;
-                background-color: transparent;
-                border: none;
-                border-radius: 0;
-                min-width: 46px;
-                max-width: 46px;
-                min-height: 38px;
-                max-height: 38px;
-                font-size: 16px;
-            }
+    def retheme(self):
+        size = QSize(16, 16)
 
-            QPushButton#titleMinButton:hover,
-            QPushButton#titleMaxButton:hover {
-                background-color: #343a46;
-                color: #ffffff;
-            }
+        self.min_button.setIcon(make_icon("minimize", "muted", 16))
+        self.min_button.setIconSize(size)
+        self.close_button.setIcon(make_icon("close", "muted", 16))
+        self.close_button.setIconSize(size)
+        self.sync_state()
 
-            QPushButton#titleCloseButton:hover {
-                background-color: #e81123;
-                color: #ffffff;
-            }
-
-            QPushButton:pressed {
-                background-color: #4b5563;
-            }
-
-            QPushButton#titleCloseButton:pressed {
-                background-color: #b50b1b;
-            }
-        """)
+    def sync_state(self):
+        name = "restore_win" if self.main_window.isMaximized() else "maximize"
+        self.max_button.setIcon(make_icon(name, "muted", 16))
+        self.max_button.setIconSize(QSize(16, 16))
 
     def toggle_maximize(self):
         if self.main_window.isMaximized():
             self.main_window.showNormal()
-            self.max_button.setText("□")
         else:
             self.main_window.showMaximized()
-            self.max_button.setText("❐")
+        self.sync_state()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle_maximize()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            handle = self.main_window.windowHandle()
+
+            if handle is not None:
+                try:
+                    if handle.startSystemMove():
+                        event.accept()
+                        return
+                except Exception:
+                    pass
+
             self.drag_position = (
                 event.globalPosition().toPoint()
                 - self.main_window.frameGeometry().topLeft()
@@ -1732,8 +3178,7 @@ class CustomTitleBar(QWidget):
             and not self.main_window.isMaximized()
         ):
             self.main_window.move(
-                event.globalPosition().toPoint()
-                - self.drag_position
+                event.globalPosition().toPoint() - self.drag_position
             )
             event.accept()
             return
@@ -1745,30 +3190,44 @@ class CustomTitleBar(QWidget):
         super().mouseReleaseEvent(event)
 
 
+# ============================================================
+# MAIN WINDOW
+# ============================================================
+
 class AhmadIntelligence(QMainWindow):
 
     def __init__(self):
         super().__init__()
 
         self.store = DataStore(DATA_FILE)
-        set_theme(self.store.get("theme", "dark"))
+
+        # fonts, theme, text size
+        load_font_files(self.store.get("font_files", []))
+        FONT["family"] = self.store.get("font", "") or pick_default_font()
+        set_theme(
+            self.store.get("theme", "dark"),
+            self.store.get("accent", "Aurora"),
+        )
         UI["font_px"] = int(self.store.get("font_px", 15))
+        self.bg_enabled = bool(self.store.get("anim_bg", True))
 
-        self.conversation_id = None
-        self.current_project_id = "default"
-        self.gemini_model_name = "gemini-3.8-flash"
+        # models (Gemini is the default)
         self.local_model_name = self.store.get("local_model", MODEL_NAME)
-
-        # Gemini is the default; the choice is remembered once changed.
+        self.gemini_model_name = (
+            self.store.get("gemini_model", DEFAULT_GEMINI_MODEL)
+            or DEFAULT_GEMINI_MODEL
+        )
         self.provider = self.store.get("provider", "gemini")
         if self.provider not in ("gemini", "ollama"):
             self.provider = "gemini"
-
         self.model_name = (
             self.gemini_model_name
             if self.provider == "gemini"
             else self.local_model_name
         )
+
+        self.conversation_id = None
+        self.current_project_id = "default"
 
         self.busy = False
         self.worker = None
@@ -1777,21 +3236,20 @@ class AhmadIntelligence(QMainWindow):
         self.stream_bubble = None
         self.stream_dirty = False
         self.t_start = 0.0
-        self.sidebar_pinned = False
-        self.sidebar_open = False
+        self.sidebar_open = bool(self.store.get("sidebar_open", True))
         self.stick_to_bottom = True
         self.ollama_ok = None
         self.icon_refs = {}
         self.welcome_cards = []
-        self._edge_ticks = 0
-        self._leave_ticks = 0
+        self._welcome_anim_t = 0.0
 
         initialize_database()
 
         self.setWindowTitle("Ahmad Intelligence")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        self.showMaximized()
-        self.setMinimumSize(880, 600)
+        self.setMinimumSize(940, 640)
+        self.resize(1280, 820)
+        self.setWindowState(Qt.WindowState.WindowMaximized)
 
         app = QApplication.instance()
         apply_palette(app)
@@ -1804,6 +3262,10 @@ class AhmadIntelligence(QMainWindow):
         self.new_chat()
         self.start_ping()
         self.update_bin_badge()
+
+        # soft intro
+        QTimer.singleShot(60, lambda: fade_in(self.workspace, 650))
+        QTimer.singleShot(60, lambda: fade_in(self.sidebar_host.inner, 650))
 
     # --------------------------------------------------------
     # ICON HELPERS
@@ -1826,102 +3288,90 @@ class AhmadIntelligence(QMainWindow):
         self.root = Backdrop()
         self.setCentralWidget(self.root)
 
-        self.root_layout = QHBoxLayout(self.root)
-        self.root_layout.setContentsMargins(0, 0, 0, 0)
-        self.root_layout.setSpacing(0)
+        frame = QVBoxLayout(self.root)
+        frame.setContentsMargins(0, 0, 0, 0)
+        frame.setSpacing(0)
+
+        self.title_bar = CustomTitleBar(self)
+        frame.addWidget(self.title_bar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        frame.addLayout(body, 1)
+
+        self.sidebar_host = SidebarHost(SIDEBAR_W)
+        body.addWidget(self.sidebar_host)
+        self.build_sidebar(self.sidebar_host.inner)
 
         self.workspace = QWidget()
-        self.root_layout.addWidget(self.workspace, 1)
+        body.addWidget(self.workspace, 1)
         self.build_workspace()
 
-        # Floating overlays (not part of the layout)
-        self.edge = EdgeHint(self.root)
-
-        self.sidebar = QFrame(self.root)
-        self.sidebar.setObjectName("sidebar")
-        self.sidebar.setFixedWidth(SIDEBAR_W)
-        self.build_sidebar()
-
         self.toast = Toast(self.root)
+        self.palette = CommandPalette(self)
+        self.root.resized.connect(self.palette.reposition)
 
-        # Animations and timers
-        self.sb_anim = QPropertyAnimation(self.sidebar, b"pos", self)
-        self.sb_anim.setDuration(220)
+        # Sidebar slide animation
+        self.sb_anim = QVariantAnimation(self)
+        self.sb_anim.setDuration(260)
         self.sb_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.sb_anim.valueChanged.connect(
+            lambda value: self.sidebar_host.setFixedWidth(int(value))
+        )
         self.sb_anim.finished.connect(self._sidebar_anim_done)
 
-        self.margin_anim = QVariantAnimation(self)
-        self.margin_anim.setDuration(220)
-        self.margin_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.margin_anim.valueChanged.connect(
-            lambda value: self.root_layout.setContentsMargins(
-                int(value), 0, 0, 0
-            )
-        )
+        if not self.sidebar_open:
+            self.sidebar_host.setFixedWidth(0)
+            self.sidebar_host.hide()
 
         self.stream_timer = QTimer(self)
-        self.stream_timer.setInterval(45)
+        self.stream_timer.setInterval(60)
         self.stream_timer.timeout.connect(self._flush_stream)
 
-        # Taskbar-style auto-hide: watch the pointer position
-        self.cursor_timer = QTimer(self)
-        self.cursor_timer.setInterval(30)
-        self.cursor_timer.timeout.connect(self._poll_cursor)
-        self.cursor_timer.start()
+        self.scroll_anim = QPropertyAnimation(
+            self.scroll.verticalScrollBar(), b"value", self
+        )
+        self.scroll_anim.setDuration(300)
+        self.scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self.purge_timer = QTimer(self)
         self.purge_timer.setInterval(3600 * 1000)
         self.purge_timer.timeout.connect(self.purge_expired)
         self.purge_timer.start()
 
-        self.root.resized.connect(self.place_overlays)
-
-        self.sidebar.move(-SIDEBAR_W - 4, 0)
-        self.sidebar.hide()
-        self.edge.raise_()
-        self.sidebar.raise_()
-        self.toast.raise_()
-        self.place_overlays()
-
     # ---------------- Sidebar ----------------
 
-    def build_sidebar(self):
-        side = QVBoxLayout(self.sidebar)
+    def build_sidebar(self, sidebar):
+        side = QVBoxLayout(sidebar)
         side.setContentsMargins(16, 18, 16, 14)
         side.setSpacing(9)
 
         header = QHBoxLayout()
         header.setSpacing(11)
-        header.addWidget(Logo(36))
+        header.addWidget(Orb(40))
 
         brand_column = QVBoxLayout()
         brand_column.setSpacing(0)
         brand = QLabel("Ahmad Intelligence")
         brand.setObjectName("brand")
         brand_column.addWidget(brand)
-        brand_sub = QLabel("Private · Local · Yours")
+        brand_sub = QLabel("Neural workspace")
         brand_sub.setObjectName("brandSub")
         brand_column.addWidget(brand_sub)
         header.addLayout(brand_column, 1)
 
-        self.pin_button = QPushButton()
-        self.pin_button.setObjectName("icon")
-        self.pin_button.setFixedSize(32, 32)
-        self.pin_button.setToolTip("Keep sidebar open (Ctrl+B)")
-        self.pin_button.setProperty("on", False)
-        self.pin_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.set_icon(self.pin_button, "pin", "muted", 16)
-        self.pin_button.clicked.connect(self.toggle_pin)
-        header.addWidget(self.pin_button)
+        collapse = IconButton()
+        collapse.setFixedSize(34, 34)
+        collapse.setToolTip("Hide sidebar (Ctrl+B)")
+        self.set_icon(collapse, "sidebar", "muted", 17)
+        collapse.clicked.connect(self.toggle_sidebar)
+        header.addWidget(collapse)
         side.addLayout(header)
 
         side.addSpacing(6)
 
-        self.new_chat_button = QPushButton("  New chat")
-        self.new_chat_button.setObjectName("primary")
-        self.new_chat_button.setCursor(
-            QCursor(Qt.CursorShape.PointingHandCursor)
-        )
+        self.new_chat_button = NeonButton("  New chat")
         self.set_icon(self.new_chat_button, "plus", "accent_text", 16)
         self.new_chat_button.clicked.connect(self.new_chat)
         side.addWidget(self.new_chat_button)
@@ -1973,39 +3423,45 @@ class AhmadIntelligence(QMainWindow):
         self.history.options_clicked.connect(self.history_menu)
         side.addWidget(self.history, 1)
 
+        footer = QHBoxLayout()
+        footer.setSpacing(6)
+
         self.bin_button = QPushButton("  Bin")
         self.bin_button.setObjectName("nav")
         self.bin_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.set_icon(self.bin_button, "trash", "text", 16)
         self.bin_button.clicked.connect(self.open_bin)
-        side.addWidget(self.bin_button)
+        footer.addWidget(self.bin_button, 1)
 
-        self.side_status = QLabel("●  Checking Ollama…")
+        self.settings_nav_button = QPushButton("  Settings")
+        self.settings_nav_button.setObjectName("nav")
+        self.settings_nav_button.setCursor(
+            QCursor(Qt.CursorShape.PointingHandCursor)
+        )
+        self.set_icon(self.settings_nav_button, "gear", "text", 16)
+        self.settings_nav_button.clicked.connect(self.open_settings)
+        footer.addWidget(self.settings_nav_button, 1)
+        side.addLayout(footer)
+
+        self.side_status = QLabel("●  Checking…")
         self.side_status.setObjectName("localStatus")
+        self.side_status.setTextFormat(Qt.TextFormat.RichText)
         side.addWidget(self.side_status)
 
     # ---------------- Workspace ----------------
 
     def build_workspace(self):
         layout = QVBoxLayout(self.workspace)
-        layout.setContentsMargins(26, 14, 26, 10)
+        layout.setContentsMargins(30, 14, 30, 8)
         layout.setSpacing(10)
-
-        # Custom window title bar
-        self.title_bar = CustomTitleBar(self)
-        layout.addWidget(self.title_bar)
 
         topbar = QHBoxLayout()
         topbar.setSpacing(6)
 
-        self.menu_button = QPushButton()
-        self.menu_button.setObjectName("icon")
-        self.menu_button.setFixedSize(38, 38)
-        self.menu_button.setToolTip(
-            "Sidebar: move the mouse to the left edge, or press Ctrl+B to pin"
+        self.menu_button = self.top_icon_button(
+            "sidebar", "Show / hide sidebar (Ctrl+B)", self.toggle_sidebar,
+            size=20,
         )
-        self.set_icon(self.menu_button, "sidebar", "text", 20)
-        self.menu_button.clicked.connect(self.toggle_pin)
         topbar.addWidget(self.menu_button)
 
         title_column = QVBoxLayout()
@@ -2021,12 +3477,10 @@ class AhmadIntelligence(QMainWindow):
 
         topbar.addLayout(title_column, 1)
 
-        self.model_chip = QLabel()
-        self.model_chip.setObjectName("chip")
-        self.model_chip.setTextFormat(Qt.TextFormat.RichText)
-        self.model_chip.setToolTip("Active AI model")
-        topbar.addWidget(self.model_chip)
-        self.refresh_model_chip()
+        self.palette_button = self.top_icon_button(
+            "bolt", "Command palette (Ctrl+P)", self.open_palette
+        )
+        topbar.addWidget(self.palette_button)
 
         self.export_button = self.top_icon_button(
             "download", "Export chat as Markdown", self.export_chat
@@ -2039,16 +3493,16 @@ class AhmadIntelligence(QMainWindow):
         topbar.addWidget(self.delete_button)
 
         self.theme_button = self.top_icon_button(
-            "sun" if "light" == self.store.get("theme", "dark") else "moon",
-            "Switch light / dark theme",
+            "sun" if MODE["name"] == "light" else "moon",
+            "Switch light / dark mode (Ctrl+Shift+T)",
             self.toggle_theme,
         )
         topbar.addWidget(self.theme_button)
 
-        settings_button = self.top_icon_button(
-            "tune", "Model settings", self.open_settings
+        self.settings_button = self.top_icon_button(
+            "gear", "Settings (Ctrl+,)", self.open_settings
         )
-        topbar.addWidget(settings_button)
+        topbar.addWidget(self.settings_button)
 
         layout.addLayout(topbar)
 
@@ -2061,31 +3515,36 @@ class AhmadIntelligence(QMainWindow):
 
         # Composer
         self.composer = ComposerFrame()
-        self.composer.setMaximumWidth(880)
+        self.composer.setMaximumWidth(860)
 
         composer_layout = QVBoxLayout(self.composer)
-        composer_layout.setContentsMargins(18, 12, 12, 10)
+        composer_layout.setContentsMargins(22, 14, 14, 12)
         composer_layout.setSpacing(4)
 
         self.message_input = GrowingTextEdit()
-        self.message_input.setPlaceholderText("Message Ahmad Intelligence…")
+        self.message_input.setPlaceholderText("Ask anything…")
         self.message_input.submitted.connect(self.send_message)
         self.message_input.focus_changed.connect(self.composer.set_focused)
         self.message_input.textChanged.connect(self._update_send_state)
         composer_layout.addWidget(self.message_input)
 
         bottom = QHBoxLayout()
-        hint = QLabel(
-            "Enter to send  ·  Shift+Enter new line  ·  Ctrl +/- text size"
-        )
+        bottom.setSpacing(10)
+
+        self.model_chip = ChipLabel()
+        self.model_chip.setObjectName("chip")
+        self.model_chip.setTextFormat(Qt.TextFormat.RichText)
+        self.model_chip.setToolTip("Active model - click to change")
+        self.model_chip.clicked.connect(self.open_settings)
+        bottom.addWidget(self.model_chip)
+
+        hint = QLabel("Enter to send  ·  Shift+Enter new line  ·  Ctrl+P commands")
         hint.setObjectName("hint")
         bottom.addWidget(hint, 1)
 
-        self.send_button = QPushButton()
-        self.send_button.setObjectName("sendBtn")
-        self.send_button.setFixedSize(34, 34)
-        self.send_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.set_icon(self.send_button, "send", "accent_text", 18)
+        self.send_button = NeonButton(circular=True)
+        self.send_button.setFixedSize(46, 46)
+        self.set_icon(self.send_button, "send", "accent_text", 19)
         self.send_button.clicked.connect(self.on_send_clicked)
         bottom.addWidget(self.send_button)
         composer_layout.addLayout(bottom)
@@ -2096,20 +3555,29 @@ class AhmadIntelligence(QMainWindow):
         composer_row.addStretch(1)
         layout.addLayout(composer_row)
 
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.addSpacing(16)
+        status_row.addStretch(1)
+
         self.status = QLabel("Ready")
         self.status.setObjectName("status")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.status)
+        status_row.addWidget(self.status)
+        status_row.addStretch(1)
+
+        self.size_grip = QSizeGrip(self)
+        self.size_grip.setFixedSize(16, 16)
+        status_row.addWidget(self.size_grip)
+        layout.addLayout(status_row)
 
         self._update_send_state()
 
-    def top_icon_button(self, icon_name, tooltip, slot):
-        button = QPushButton()
-        button.setObjectName("icon")
-        button.setFixedSize(38, 38)
+    def top_icon_button(self, icon_name, tooltip, slot, size=19):
+        button = IconButton()
+        button.setFixedSize(40, 40)
         button.setToolTip(tooltip)
-        button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.set_icon(button, icon_name, "text", 19)
+        self.set_icon(button, icon_name, "text", size)
         button.clicked.connect(slot)
         return button
 
@@ -2131,7 +3599,7 @@ class AhmadIntelligence(QMainWindow):
         outer.setContentsMargins(0, 0, 6, 0)
 
         column = QWidget()
-        column.setMaximumWidth(880)
+        column.setMaximumWidth(860)
         self.msg_layout = QVBoxLayout(column)
         self.msg_layout.setContentsMargins(0, 8, 0, 28)
         self.msg_layout.setSpacing(4)
@@ -2156,26 +3624,32 @@ class AhmadIntelligence(QMainWindow):
         layout.setSpacing(0)
 
         layout.addStretch(3)
-        layout.addWidget(Logo(60), 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(22)
 
-        hero = QLabel("How can I help you today?")
-        hero.setObjectName("hero")
-        hero.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hero_orb = Orb(104, animated=True)
+        layout.addWidget(self.hero_orb, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(14)
+
+        self.greeting = QLabel("Hello")
+        self.greeting.setObjectName("greeting")
+        self.greeting.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.greeting)
+        layout.addSpacing(2)
+
+        hero = GradientLabel("How can I help you today?", px=42)
         layout.addWidget(hero)
 
-        subtitle = QLabel("Think clearly. Build carefully. Keep it private.")
+        subtitle = QLabel("Think clearly. Build boldly. Everything stays yours.")
         subtitle.setObjectName("heroSub")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addSpacing(6)
+        layout.addSpacing(4)
         layout.addWidget(subtitle)
-        layout.addSpacing(30)
+        layout.addSpacing(34)
 
         holder = QWidget()
-        holder.setMaximumWidth(780)
+        holder.setMaximumWidth(820)
         grid = QGridLayout(holder)
         grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(12)
+        grid.setSpacing(16)
 
         cards = [
             (
@@ -2221,15 +3695,17 @@ class AhmadIntelligence(QMainWindow):
     def setup_shortcuts(self):
         bindings = [
             ("Ctrl+N", self.new_chat),
-            ("Ctrl+B", self.toggle_pin),
+            ("Ctrl+B", self.toggle_sidebar),
             ("Ctrl+K", self.focus_search),
+            ("Ctrl+P", self.open_palette),
+            ("Ctrl+,", self.open_settings),
             ("Ctrl+Shift+E", self.export_chat),
             ("Ctrl+Shift+T", self.toggle_theme),
             ("Ctrl+=", lambda: self.zoom(1)),
             ("Ctrl++", lambda: self.zoom(1)),
             ("Ctrl+-", lambda: self.zoom(-1)),
             ("Ctrl+0", lambda: self.zoom(0)),
-            ("Esc", self.stop_generation),
+            ("Esc", self.on_escape),
         ]
         self._shortcuts = []
 
@@ -2238,147 +3714,126 @@ class AhmadIntelligence(QMainWindow):
             shortcut.activated.connect(callback)
             self._shortcuts.append(shortcut)
 
+    def on_escape(self):
+        if self.palette.isVisible():
+            self.palette.close_palette()
+        else:
+            self.stop_generation()
+
+    def open_palette(self, *_args):
+        self.palette.open_palette()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+
+        if hasattr(self, "title_bar"):
+            self.title_bar.sync_state()
+
+        if hasattr(self, "size_grip"):
+            self.size_grip.setVisible(not self.isMaximized())
+
+        if hasattr(self, "stack"):
+            self.update_bg_animation()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.update_bg_animation()
+
     # --------------------------------------------------------
-    # TASKBAR-STYLE AUTO-HIDING SIDEBAR
+    # PAGES & BACKGROUND ANIMATION
     # --------------------------------------------------------
 
-    def place_overlays(self):
-        height = self.root.height()
-        self.edge.setGeometry(0, 0, 6, height)
-        self.sidebar.setFixedHeight(height)
+    def show_page(self, widget):
+        self.stack.setCurrentWidget(widget)
+        self.update_bg_animation()
 
-        if self.sb_anim.state() != QAbstractAnimation.State.Running:
-            x = 0 if self.sidebar_open else -SIDEBAR_W - 4
-            self.sidebar.move(x, 0)
+    def update_bg_animation(self):
+        want = (
+            self.bg_enabled
+            and self.stack.currentWidget() is self.welcome
+            and self.isVisible()
+            and not self.isMinimized()
+        )
+        self.root.set_animated(want)
 
-    def _poll_cursor(self):
-        """Show when the pointer touches the far-left edge, hide when it leaves."""
-        if self.sidebar_pinned or not self.isVisible() or self.isMinimized():
-            return
-
-        if (
-            QApplication.activeModalWidget() is not None
-            or QApplication.activePopupWidget() is not None
-        ):
-            self._leave_ticks = 0
-            return
-
-        local = self.root.mapFromGlobal(QCursor.pos())
-        inside_height = 0 <= local.y() <= self.root.height()
-        active = self.isActiveWindow()
-
-        if not self.sidebar_open:
-            at_edge = (
-                active and inside_height and -1 <= local.x() <= EDGE_PX
-            )
-            self._edge_ticks = self._edge_ticks + 1 if at_edge else 0
-
-            if self._edge_ticks >= 3:  # ~90 ms dwell, like a taskbar
-                self._edge_ticks = 0
-                self.show_sidebar()
-            return
-
-        over = (
-            active
-            and inside_height
-            and 0 <= local.x() <= SIDEBAR_W + HIDE_SLACK
+    def toggle_bg(self):
+        self.bg_enabled = not self.bg_enabled
+        self.store.set("anim_bg", self.bg_enabled)
+        self.update_bg_animation()
+        self.toast.pop(
+            "Animated background on"
+            if self.bg_enabled
+            else "Animated background off"
         )
 
-        if self.search.hasFocus() and self.search.text():
-            over = True  # keep it open while searching
+    # --------------------------------------------------------
+    # SIDEBAR  (docked, slides open and closed)
+    # --------------------------------------------------------
 
-        if over:
-            self._leave_ticks = 0
-        else:
-            self._leave_ticks += 1
-            if self._leave_ticks >= 7:  # ~200 ms grace
-                self.hide_sidebar()
+    def toggle_sidebar(self, *_args):
+        self.set_sidebar_open(not self.sidebar_open)
 
-    def show_sidebar(self):
-        self._leave_ticks = 0
+    def set_sidebar_open(self, value, animate=True):
+        self.sidebar_open = value
+        self.store.set("sidebar_open", value)
 
-        if self.sidebar_open:
+        target = SIDEBAR_W if value else 0
+        self.sb_anim.stop()
+
+        if value:
+            self.sidebar_host.show()
+
+        if not animate:
+            self.sidebar_host.setFixedWidth(target)
+            self.sidebar_host.setVisible(value)
             return
 
-        self.sidebar_open = True
-        self.edge.active = False
-        self.edge.update()
-
-        self.sidebar.show()
-        self.sidebar.raise_()
-        self.toast.raise_()
-
-        self.sb_anim.stop()
-        self.sb_anim.setStartValue(self.sidebar.pos())
-        self.sb_anim.setEndValue(QPoint(0, 0))
-        self.sb_anim.start()
-
-    def hide_sidebar(self):
-        if self.sidebar_pinned or not self.sidebar_open:
-            return
-
-        self.sidebar_open = False
-        self.edge.active = True
-        self.edge.update()
-        self.search.clearFocus()
-
-        self.sb_anim.stop()
-        self.sb_anim.setStartValue(self.sidebar.pos())
-        self.sb_anim.setEndValue(QPoint(-SIDEBAR_W - 4, 0))
+        self.sb_anim.setStartValue(self.sidebar_host.width())
+        self.sb_anim.setEndValue(target)
         self.sb_anim.start()
 
     def _sidebar_anim_done(self):
         if not self.sidebar_open:
-            self.sidebar.hide()
-
-    def toggle_pin(self):
-        self.sidebar_pinned = not self.sidebar_pinned
-
-        self.pin_button.setProperty("on", self.sidebar_pinned)
-        refresh_style(self.pin_button)
-        self.set_icon(
-            self.pin_button, "pin",
-            "text" if self.sidebar_pinned else "muted", 16,
-        )
-
-        self.margin_anim.stop()
-        self.margin_anim.setStartValue(
-            self.root_layout.contentsMargins().left()
-        )
-        self.margin_anim.setEndValue(SIDEBAR_W if self.sidebar_pinned else 0)
-        self.margin_anim.start()
-
-        if self.sidebar_pinned:
-            self.show_sidebar()
-        else:
-            self._leave_ticks = 0
+            self.sidebar_host.hide()
 
     def focus_search(self):
-        self.show_sidebar()
+        if not self.sidebar_open:
+            self.set_sidebar_open(True)
         self.search.setFocus()
         self.search.selectAll()
 
     # --------------------------------------------------------
-    # THEME & TEXT SIZE
+    # THEME, FONT & TEXT SIZE
     # --------------------------------------------------------
 
-    def toggle_theme(self):
-        name = "light" if self.store.get("theme", "dark") == "dark" else "dark"
-        self.store.set("theme", name)
-        set_theme(name)
+    def apply_look(self, theme, accent, family, px):
+        self.store.set("theme", theme)
+        self.store.set("accent", accent)
+        self.store.set("font", family)
+        self.store.set("font_px", px)
+
+        if family:
+            FONT["family"] = family
+        UI["font_px"] = px
+        set_theme(theme, accent)
 
         app = QApplication.instance()
         apply_palette(app)
         app.setStyleSheet(build_style())
 
         self.set_icon(
-            self.theme_button, "sun" if name == "light" else "moon", "text", 19
+            self.theme_button,
+            "sun" if theme == "light" else "moon",
+            "text",
+            19,
         )
         self.retheme_icons()
+        self.title_bar.retheme()
 
         for card in self.welcome_cards:
             card.retheme()
 
+        self.root.invalidate()
         self.refresh_model_chip()
         self.load_conversations(select_id=self.conversation_id)
 
@@ -2388,19 +3843,126 @@ class AhmadIntelligence(QMainWindow):
         for widget in self.findChildren(QWidget):
             widget.update()
 
-        self.toast.pop("Light theme" if name == "light" else "Dark theme")
+    def toggle_theme(self):
+        name = "light" if MODE["name"] == "dark" else "dark"
+        self.apply_look(name, MODE["accent"], FONT["family"], UI["font_px"])
+        self.toast.pop("Light mode" if name == "light" else "Dark mode")
 
     def zoom(self, direction):
         if direction == 0:
-            UI["font_px"] = 15
+            size = 15
         else:
-            UI["font_px"] = max(12, min(21, UI["font_px"] + direction))
+            size = max(12, min(22, UI["font_px"] + direction))
 
-        self.store.set("font_px", UI["font_px"])
-        self.toast.pop(f"Text size {UI['font_px']}")
+        UI["font_px"] = size
+        self.store.set("font_px", size)
+        self.toast.pop(f"Text size {size}")
 
         if not self.busy and self.conversation_id is not None:
             self.render_conversation()
+
+    def remember_font_file(self, path):
+        files = list(self.store.get("font_files", []))
+
+        if path not in files:
+            files.append(path)
+            self.store.set("font_files", files)
+
+    # --------------------------------------------------------
+    # SETTINGS & COMMANDS
+    # --------------------------------------------------------
+
+    def open_settings(self, *_args, page=0):
+        dialog = SettingsDialog(self, page)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_settings(dialog.values())
+
+    def apply_settings(self, values):
+        self.provider = values["provider"]
+        self.store.set("provider", self.provider)
+
+        if values["local_model"]:
+            self.local_model_name = values["local_model"]
+            self.store.set("local_model", self.local_model_name)
+
+        self.gemini_model_name = (
+            values["gemini_model"] or DEFAULT_GEMINI_MODEL
+        )
+        self.store.set("gemini_model", self.gemini_model_name)
+
+        self.model_name = (
+            self.gemini_model_name
+            if self.provider == "gemini"
+            else self.local_model_name
+        )
+
+        self.bg_enabled = bool(values["anim_bg"])
+        self.store.set("anim_bg", self.bg_enabled)
+
+        self.apply_look(
+            values["theme"],
+            values["accent"],
+            values["font"],
+            values["font_px"],
+        )
+
+        self.update_bg_animation()
+        self.refresh_model_chip()
+        self.toast.pop("Settings saved")
+
+    def set_provider(self, provider):
+        self.provider = provider
+        self.store.set("provider", provider)
+        self.model_name = (
+            self.gemini_model_name
+            if provider == "gemini"
+            else self.local_model_name
+        )
+        self.refresh_model_chip()
+        self.toast.pop(
+            "Using Gemini (cloud)" if provider == "gemini" else "Using Ollama (local)"
+        )
+
+    def palette_actions(self):
+        actions = [
+            ("New chat", "Ctrl+N", "plus", self.new_chat),
+            ("Search chats", "Ctrl+K", "search", self.focus_search),
+            ("Open settings", "Ctrl+,", "gear", self.open_settings),
+            ("Font settings", "", "type", lambda: self.open_settings(page=2)),
+            (
+                "Appearance settings", "", "palette",
+                lambda: self.open_settings(page=1),
+            ),
+            ("Toggle sidebar", "Ctrl+B", "sidebar", self.toggle_sidebar),
+            (
+                "Toggle light / dark mode", "Ctrl+Shift+T", "sun",
+                self.toggle_theme,
+            ),
+            ("Toggle animated background", "", "sparkle", self.toggle_bg),
+            ("Export current chat", "Ctrl+Shift+E", "download", self.export_chat),
+            ("Open bin", "", "trash", self.open_bin),
+            (
+                "Use Gemini (cloud)", "", "sparkle",
+                lambda: self.set_provider("gemini"),
+            ),
+            (
+                "Use Ollama (local)", "", "code",
+                lambda: self.set_provider("ollama"),
+            ),
+        ]
+
+        for name in NEON:
+            actions.append(
+                (
+                    f"Theme: {name}", "", "palette",
+                    lambda n=name: self.apply_look(
+                        MODE["name"], n, FONT["family"], UI["font_px"]
+                    ),
+                )
+            )
+
+        return actions
 
     # --------------------------------------------------------
     # STATUS
@@ -2408,8 +3970,8 @@ class AhmadIntelligence(QMainWindow):
 
     def refresh_model_chip(self):
         if self.provider == "gemini":
-            color = T["ok"]
-            provider_label = "Cloud · Gemini 3.8 Flash"
+            color = T["ok"] if os.getenv("GEMINI_API_KEY") else T["danger"]
+            label = f"Gemini  ·  {self.gemini_model_name}"
         else:
             if self.ollama_ok is None:
                 color = T["muted"]
@@ -2418,11 +3980,30 @@ class AhmadIntelligence(QMainWindow):
             else:
                 color = T["danger"]
 
-            provider_label = f"Local · {self.local_model_name}"
+            label = f"Ollama  ·  {self.local_model_name}"
 
         self.model_chip.setText(
             f"<span style='color:{color};'>●</span>&nbsp;&nbsp;"
-            f"{html.escape(provider_label)}"
+            f"{html.escape(label)}"
+        )
+        self.refresh_status_pill()
+
+    def refresh_status_pill(self):
+        if self.provider == "gemini":
+            if os.getenv("GEMINI_API_KEY"):
+                dot, text = T["ok"], "Cloud AI ready"
+            else:
+                dot, text = T["danger"], "Gemini API key missing"
+        else:
+            if self.ollama_ok is None:
+                dot, text = T["muted"], "Checking Ollama…"
+            elif self.ollama_ok:
+                dot, text = T["ok"], "Ollama connected"
+            else:
+                dot, text = T["danger"], "Ollama offline — start it"
+
+        self.side_status.setText(
+            f"<span style='color:{dot};'>●</span>&nbsp;&nbsp;{html.escape(text)}"
         )
 
     def start_ping(self):
@@ -2434,6 +4015,7 @@ class AhmadIntelligence(QMainWindow):
         self._ping_timer.timeout.connect(self._ping_tick)
         self._ping_timer.start()
 
+        self.refresh_model_chip()
         self._ping_tick()
 
     def _ping_tick(self):
@@ -2444,10 +4026,30 @@ class AhmadIntelligence(QMainWindow):
         self.ollama_ok = ok
         self.refresh_model_chip()
 
-        if ok:
-            self.side_status.setText("●  Ollama connected")
+    def update_greeting(self):
+        hour = time.localtime().tm_hour
+
+        if hour < 5:
+            text = "Working late"
+        elif hour < 12:
+            text = "Good morning"
+        elif hour < 18:
+            text = "Good afternoon"
         else:
-            self.side_status.setText("●  Ollama offline — start it")
+            text = "Good evening"
+
+        self.greeting.setText(text)
+
+    def play_welcome_animation(self):
+        now = time.time()
+
+        if now - self._welcome_anim_t < 0.7:
+            return
+
+        self._welcome_anim_t = now
+
+        for index, card in enumerate(self.welcome_cards):
+            fade_in(card, 380, delay=80 * index)
 
     # --------------------------------------------------------
     # PROJECTS
@@ -2539,12 +4141,12 @@ class AhmadIntelligence(QMainWindow):
 
         project_id, project_name, instructions = project
 
-        dialog = QDialog(self)
+        dialog = FadeDialog(self)
         dialog.setWindowTitle(f"{project_name} — Instructions")
-        dialog.resize(560, 440)
+        dialog.resize(600, 480)
 
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setContentsMargins(28, 26, 28, 22)
         layout.setSpacing(12)
 
         heading = QLabel(f"Instructions for {project_name}")
@@ -2614,7 +4216,7 @@ class AhmadIntelligence(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, conversation_id)
 
             if self.store.is_pinned(conversation_id):
-                item.setIcon(make_icon("pin", "muted", 14))
+                item.setIcon(make_icon("pin", "accent", 14))
                 pinned_items.append(item)
             else:
                 normal_items.append(item)
@@ -2661,7 +4263,6 @@ class AhmadIntelligence(QMainWindow):
         project_action = menu.addAction(
             make_icon("folder", "text", 16), "Add to project"
         )
-
         rename_action = menu.addAction(make_icon("edit", "text", 16), "Rename")
         pin_action = menu.addAction(
             make_icon("pin", "text", 16),
@@ -2768,7 +4369,9 @@ class AhmadIntelligence(QMainWindow):
         self.current_answer = ""
 
         self.clear_messages()
-        self.stack.setCurrentWidget(self.welcome)
+        self.show_page(self.welcome)
+        self.update_greeting()
+        self.play_welcome_animation()
 
         self.page_title.setText("New chat")
         self.update_subtitle()
@@ -2850,7 +4453,7 @@ class AhmadIntelligence(QMainWindow):
 
     def update_bin_badge(self):
         count = len(self.store.data["trash"])
-        self.bin_button.setText("  Bin" + (f"   ·   {count}" if count else ""))
+        self.bin_button.setText("  Bin" + (f"  ·  {count}" if count else ""))
 
     def open_bin(self):
         self.purge_expired()
@@ -2943,10 +4546,10 @@ class AhmadIntelligence(QMainWindow):
         )
 
         if not messages:
-            self.stack.setCurrentWidget(self.welcome)
+            self.show_page(self.welcome)
             return
 
-        self.stack.setCurrentWidget(self.scroll)
+        self.show_page(self.scroll)
         self.stick_to_bottom = True
 
         for role, content in messages:
@@ -2961,7 +4564,12 @@ class AhmadIntelligence(QMainWindow):
 
     def jump_to_latest(self):
         self.stick_to_bottom = True
-        self.scroll_to_bottom()
+        bar = self.scroll.verticalScrollBar()
+
+        self.scroll_anim.stop()
+        self.scroll_anim.setStartValue(bar.value())
+        self.scroll_anim.setEndValue(bar.maximum())
+        self.scroll_anim.start()
 
     def _range_changed(self, _minimum, maximum):
         if self.stick_to_bottom:
@@ -3004,17 +4612,15 @@ class AhmadIntelligence(QMainWindow):
         self.composer.set_glowing(busy)
 
         if busy:
-            self.send_button.setObjectName("stopBtn")
-            self.set_icon(self.send_button, "stop", "accent_text", 18)
+            self.set_icon(self.send_button, "stop", "accent_text", 19)
             self.send_button.setToolTip("Stop generating (Esc)")
             self.send_button.setEnabled(True)
         else:
-            self.send_button.setObjectName("sendBtn")
-            self.set_icon(self.send_button, "send", "accent_text", 18)
+            self.set_icon(self.send_button, "send", "accent_text", 19)
             self.send_button.setToolTip("Send")
             self._update_send_state()
 
-        refresh_style(self.send_button)
+        self.send_button.update()
         self.update_actions()
 
     def on_send_clicked(self):
@@ -3027,6 +4633,19 @@ class AhmadIntelligence(QMainWindow):
         if self.busy and self.worker is not None:
             self.worker.stop()
             self.status.setText("Stopping…")
+
+    def build_history(self):
+        """Last few messages only - keeps long chats fast."""
+        rows = get_messages(self.conversation_id)
+        messages = [
+            {"role": role, "content": content} for role, content in rows
+        ]
+        messages = messages[-HISTORY_LIMIT:]
+
+        while messages and messages[0]["role"] != "user":
+            messages.pop(0)
+
+        return messages
 
     def send_message(self):
         if self.busy:
@@ -3065,7 +4684,7 @@ class AhmadIntelligence(QMainWindow):
         if not previous_messages:
             self.clear_messages()
 
-        self.stack.setCurrentWidget(self.scroll)
+        self.show_page(self.scroll)
         self.stick_to_bottom = True
 
         self.add_message("user", question, animate=True)
@@ -3076,10 +4695,7 @@ class AhmadIntelligence(QMainWindow):
             self.msg_layout.count() - 1, self.stream_bubble
         )
 
-        messages = [
-            {"role": role, "content": content}
-            for role, content in get_messages(self.conversation_id)
-        ]
+        messages = self.build_history()
         instructions = get_project_instructions_for_conversation(
             self.conversation_id
         )
@@ -3105,6 +4721,7 @@ class AhmadIntelligence(QMainWindow):
         self.worker.failed.connect(self.on_failed)
         self.worker.start()
 
+        self.stream_timer.setInterval(60)
         self.stream_timer.start()
         QTimer.singleShot(0, self.scroll_to_bottom)
 
@@ -3123,6 +4740,12 @@ class AhmadIntelligence(QMainWindow):
         if self.stream_dirty and self.stream_bubble is not None:
             self.stream_bubble.set_text(self.current_answer)
             self.stream_dirty = False
+
+            # Re-rendering long answers is costly, so slow down as they grow.
+            size = len(self.current_answer)
+            self.stream_timer.setInterval(
+                60 if size < 1500 else 120 if size < 5000 else 220
+            )
 
     def _end_stream(self):
         self.stream_timer.stop()
@@ -3206,104 +4829,6 @@ class AhmadIntelligence(QMainWindow):
         self.message_input.setFocus()
 
     # --------------------------------------------------------
-    # MODEL SETTINGS
-    # --------------------------------------------------------
-
-    def open_settings(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Ahmad Intelligence settings")
-        dialog.resize(500, 320)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 22, 24, 20)
-        layout.setSpacing(14)
-
-        heading = QLabel("Model settings")
-        heading.setObjectName("dialogTitle")
-        layout.addWidget(heading)
-
-        description = QLabel(
-            "Choose between local Ollama models and cloud Gemini AI."
-        )
-        description.setWordWrap(True)
-        description.setObjectName("muted")
-        layout.addWidget(description)
-
-        form = QFormLayout()
-
-        provider_combo = QComboBox()
-        provider_combo.addItem("Local AI (Ollama)", "ollama")
-        provider_combo.addItem("Cloud AI (Gemini)", "gemini")
-
-        current_provider_index = provider_combo.findData(self.provider)
-        if current_provider_index >= 0:
-            provider_combo.setCurrentIndex(current_provider_index)
-
-        model_combo = QComboBox()
-        model_combo.setEditable(True)
-
-        try:
-            response = requests.get(ollama_base() + "/api/tags", timeout=3)
-            response.raise_for_status()
-
-            names = [
-                item.get("name", "")
-                for item in response.json().get("models", [])
-                if item.get("name")
-            ]
-            model_combo.addItems(names)
-        except requests.RequestException:
-            pass
-
-        if model_combo.count() == 0:
-            model_combo.addItem(self.local_model_name)
-
-        if self.local_model_name:
-            model_combo.setCurrentText(self.local_model_name)
-
-        form.addRow("AI provider", provider_combo)
-        form.addRow("Ollama model", model_combo)
-        layout.addLayout(form)
-
-        note = QLabel(
-            "Gemini uses your configured GEMINI_API_KEY. "
-            "Ollama models must already be downloaded."
-        )
-        note.setWordWrap(True)
-        note.setObjectName("hint")
-        layout.addWidget(note)
-
-        layout.addStretch(1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save
-            | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            chosen_provider = provider_combo.currentData()
-            chosen_local_model = model_combo.currentText().strip()
-
-            self.provider = chosen_provider
-            self.store.set("provider", self.provider)
-
-            if chosen_local_model:
-                self.local_model_name = chosen_local_model
-                self.store.set("local_model", self.local_model_name)
-
-            if self.provider == "gemini":
-                self.model_name = self.gemini_model_name
-                self.toast.pop("Cloud AI: Gemini 3.8 Flash")
-            else:
-                self.model_name = self.local_model_name
-                self.toast.pop(f"Local AI: {self.model_name}")
-
-            self.refresh_model_chip()
-
-    # --------------------------------------------------------
     # SHUTDOWN
     # --------------------------------------------------------
 
@@ -3312,8 +4837,9 @@ class AhmadIntelligence(QMainWindow):
             self.worker.stop()
             self.worker.wait(3000)
 
-        if self._ping.isRunning():
-            self._ping.wait(2500)
+        ping = getattr(self, "_ping", None)
+        if ping is not None and ping.isRunning():
+            ping.wait(2500)
 
         super().closeEvent(event)
 
